@@ -1,0 +1,34 @@
+[package]
+name = "tricoredb"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Blocking Rust client for TriCoreDB's native `tricore` protocol: SQL, documents, cache, vectors, graphs and LLM context over one connection."
+repository = "https://github.com/trinesh14/tricoredb-sdk-rust"
+documentation = "https://docs.rs/tricoredb"
+readme = "README.md"
+keywords = ["tricoredb", "database", "client", "sql", "vector"]
+categories = ["database", "network-programming"]
+include = [
+    "src/**/*.rs",
+    "examples/**/*.rs",
+    "tests/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+]
+
+[features]
+default = ["tls"]
+tls = ["dep:rustls", "dep:rustls-pki-types"]
+
+[dependencies]
+serde = { version = "1.0.200", features = ["derive"] }
+serde_json = "1.0.120"
+rustls = { version = "0.23.20", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-pki-types = { version = "1.10", features = ["std"], optional = true }
+
+[package.metadata.docs.rs]
+all-features = true
