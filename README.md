@@ -3,9 +3,9 @@
 Official Rust client for [TriCoreDB](https://hub.docker.com/r/trinesh14/tricoredb):
 SQL, documents, vectors, graphs and cache over one native connection.
 
-[![crates.io](https://img.shields.io/crates/v/tricoredb?cacheSeconds=3600)](https://crates.io/crates/tricoredb)
-[![docs.rs](https://img.shields.io/docsrs/tricoredb?cacheSeconds=3600)](https://docs.rs/tricoredb)
-[![license](https://img.shields.io/crates/l/tricoredb?cacheSeconds=86400)](LICENSE)
+[![crates.io](https://img.shields.io/crates/v/tricoredb?logo=rust&label=crates.io&color=blue&cacheSeconds=1800)](https://crates.io/crates/tricoredb)
+[![docs.rs](https://img.shields.io/docsrs/tricoredb?logo=docsdotrs&label=docs&cacheSeconds=1800)](https://docs.rs/tricoredb)
+[![license](https://img.shields.io/crates/l/tricoredb?label=license&color=blue&cacheSeconds=1800)](LICENSE)
 
 - **Blocking, no async runtime.** Calls block; a `Pool` serves concurrent work.
 - **Server-side parameters.** Values never become part of the SQL text.
