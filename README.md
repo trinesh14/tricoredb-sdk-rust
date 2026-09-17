@@ -50,14 +50,14 @@ Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-tricoredb = "0.1"
+tricoredb = "0.2"
 ```
 
 TLS is on by default. For a build with no cryptography dependencies at all:
 
 ```toml
 [dependencies]
-tricoredb = { version = "0.1", default-features = false }
+tricoredb = { version = "0.2", default-features = false }
 ```
 
 ## Running a server
@@ -123,6 +123,9 @@ cleanly.
 | `read_timeout` | `None` | Bound on each wait for a reply |
 | `tls` | `None` (plain TCP) | See [TLS](#tls) |
 | `features` | all | Capability bitmap announced in the handshake |
+| `follow_leader` | `true` | Send a `not_leader` refusal again, to the leader |
+| `leader_retries` | `5` | How many times a refused request is sent again |
+| `leader_retry_delay` | `250ms` | First pause before asking again; doubles up to 2 s |
 
 Each field has a builder method, so options read as one expression:
 
@@ -458,11 +461,24 @@ not. A connection that failed that way is dropped, and every later call on it
 reports the original failure instead of reading a stale reply as the next
 answer.
 
-**Leader redirects.** In a cluster, a write that reaches a follower fails with
-`code() == "not_leader"`, which `is_redirect()` tests. When the leader is known,
-`leader_hint()` holds its `host:port`; an empty hint means the leader is not
-known yet, so wait and retry. This client does not follow redirects for you —
-where to resend a write is your application's decision.
+**Leader redirects.** In a cluster only the leader accepts writes, and a
+follower refuses with `code() == "not_leader"` (`is_redirect()`). The client
+handles that itself unless `follow_leader(false)` is set:
+
+- when the refusal names the leader (`leader_hint()`), it opens a connection
+  there with the same user, secret and TLS settings (the leader's host is the
+  certificate name), sends the request again, and keeps that connection
+  (`address()` reports it);
+- while an election is in progress (no hint), it waits and asks the same node
+  again, pausing 250 ms, then 500 ms, up to 2 s;
+- after `leader_retries` (5) it returns the last refusal.
+
+This is safe because a `not_leader` refusal was applied nowhere. Nothing is sent
+again inside a session transaction, and never a refusal with
+`code() == Some(OUTCOME_UNKNOWN)`: a follower handed that request to the leader
+and lost the answer, or the leader could not confirm it in time, so it may have
+been applied. The leader's address must be reachable from your application;
+when it is not, the client keeps its connection and waits.
 
 ## TLS
 

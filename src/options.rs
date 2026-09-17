@@ -151,6 +151,20 @@ pub struct Options {
     /// An explicit `Some(0)` announces nothing, which is why this is an option
     /// rather than a plain `u64`.
     pub features: Option<u64>,
+    /// Send a request again when a cluster node refuses it with `not_leader`.
+    ///
+    /// On by default. The request goes to the leader the refusal names, over a
+    /// new connection that replaces this one (same user, secret and TLS
+    /// settings, with the leader's host as the certificate name), or, while no
+    /// leader is known, to the same node after a pause. That is safe because a
+    /// `not_leader` refusal was applied nowhere. It never happens inside a
+    /// session transaction.
+    pub follow_leader: bool,
+    /// How many times a refused request is sent again. Defaults to 5.
+    pub leader_retries: u32,
+    /// The first pause before asking again; it doubles up to two seconds.
+    /// Defaults to 250 ms.
+    pub leader_retry_delay: Duration,
 }
 
 impl Default for Options {
@@ -166,6 +180,9 @@ impl Default for Options {
             read_timeout: None,
             tls: None,
             features: None,
+            follow_leader: true,
+            leader_retries: 5,
+            leader_retry_delay: Duration::from_millis(250),
         }
     }
 }
@@ -225,6 +242,24 @@ impl Options {
     /// Announce exactly these capabilities in the handshake.
     pub fn features(mut self, features: u64) -> Self {
         self.features = Some(features);
+        self
+    }
+
+    /// Follow the leader on `not_leader` (the default), or return the refusal.
+    pub fn follow_leader(mut self, yes: bool) -> Self {
+        self.follow_leader = yes;
+        self
+    }
+
+    /// How many times a refused request is sent again.
+    pub fn leader_retries(mut self, retries: u32) -> Self {
+        self.leader_retries = retries;
+        self
+    }
+
+    /// The first pause before asking again.
+    pub fn leader_retry_delay(mut self, delay: Duration) -> Self {
+        self.leader_retry_delay = delay;
         self
     }
 

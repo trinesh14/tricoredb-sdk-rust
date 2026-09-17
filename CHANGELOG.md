@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-17
+
+### Added
+
+- Following the leader: a request refused with `not_leader` is sent again,
+  to the leader the refusal names (over a new connection that replaces the
+  current one) or, while no leader is known, to the same node after a pause.
+  On by default; `Options::follow_leader(false)` restores the previous
+  behaviour, and `leader_retries` (5) and `leader_retry_delay` (250 ms) bound
+  it. Never inside a session transaction.
+- `OUTCOME_UNKNOWN`: a request that may or may not have been applied. It is
+  never sent again.
+- `Client::address()`.
+
+### Changed
+
+- `Options` has three new public fields, so building it with a struct literal
+  needs `..Options::default()`.
+
 ## [0.1.0] - 2026-09-16
 
 First release.
@@ -44,5 +63,6 @@ First release.
   reused: the late reply can never be read as the answer to the next request.
 - Errors name a certificate or key file's path, never its contents.
 
-[Unreleased]: https://github.com/trinesh14/tricoredb-sdk-rust/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/trinesh14/tricoredb-sdk-rust/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/trinesh14/tricoredb-sdk-rust/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/trinesh14/tricoredb-sdk-rust/releases/tag/v0.1.0

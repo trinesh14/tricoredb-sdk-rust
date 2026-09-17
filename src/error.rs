@@ -6,6 +6,11 @@ use std::io;
 /// The error code a Raft follower attaches when it cannot serve a request.
 pub const NOT_LEADER: &str = "not_leader";
 
+/// The code of a request a follower handed to the leader and lost the answer
+/// to, or one the leader could not confirm in time. It may or may not have
+/// been applied, so this client never sends it again.
+pub const OUTCOME_UNKNOWN: &str = "outcome_unknown";
+
 /// Result alias used throughout the crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -144,9 +149,8 @@ impl Error {
 
     /// True for every `not_leader` refusal, whether or not a hint is present.
     ///
-    /// This client never follows the hint on its own: the address may be
-    /// unreachable from here, a new connection must authenticate again, and a
-    /// session transaction cannot move to another node.
+    /// Unless [`crate::Options::follow_leader`] is off, the client has already
+    /// sent the request again before returning this.
     pub fn is_redirect(&self) -> bool {
         self.code.as_deref() == Some(NOT_LEADER)
     }

@@ -93,7 +93,7 @@ fn a_not_leader_refusal_is_typed_and_carries_the_leader_address() {
         );
     });
 
-    let mut db = Client::connect(&peer.options).expect("connect");
+    let mut db = Client::connect(&peer.options.clone().follow_leader(false)).expect("connect");
     let error = db
         .execute_params("INSERT INTO t VALUES (?)", &params![1])
         .expect_err("a follower refuses the write");
@@ -119,7 +119,7 @@ fn a_mid_election_refusal_has_a_code_but_no_address() {
         );
     });
 
-    let mut db = Client::connect(&peer.options).expect("connect");
+    let mut db = Client::connect(&peer.options.clone().follow_leader(false)).expect("connect");
     let error = db.execute("INSERT INTO t VALUES (1)").expect_err("refused");
     assert!(error.is_redirect());
     assert_eq!(

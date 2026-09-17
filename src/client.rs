@@ -19,6 +19,11 @@ const PROTOCOL_VERSION: u32 = 1;
 /// the socket. The goodbye is optional; the teardown is not.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Following the leader: the longest pause between attempts.
+const MAX_LEADER_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// Following the leader: the connect bound for the new connection.
+const FOLLOW_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// One session with a TriCoreDB server.
 ///
 /// A connection is a single request/response stream, so every call takes
@@ -43,6 +48,11 @@ pub struct Client {
     /// previous reply as the next answer.
     fault: Option<Error>,
     closed: bool,
+    /// What this connection was opened with, to open one to the leader the
+    /// same way.
+    options: Options,
+    /// The `host:port` this connection talks to.
+    address: String,
 }
 
 #[derive(Deserialize)]
@@ -138,6 +148,8 @@ impl Client {
             read_timeout: None,
             fault: None,
             closed: false,
+            options: options.clone(),
+            address: join_address(&options.host, options.port),
         };
 
         // The handshake gets the connect budget; the steady state gets its own.
@@ -347,6 +359,12 @@ impl Client {
         self.send(op.into())
     }
 
+    /// The `host:port` this connection talks to. It changes when the client
+    /// follows the leader.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
     pub(crate) fn send(&mut self, op: Value) -> Result<Response> {
         self.request_counter += 1;
         let request_id = format!("rs-{}-{}", self.request_id_prefix, self.request_counter);
@@ -360,7 +378,67 @@ impl Client {
             envelope.insert("options".into(), json!({"timeout_ms": ms}));
         }
 
-        let frame = self.exchange(Tag::Request, Some(&Value::Object(envelope)))?;
+        let envelope = Value::Object(envelope);
+        let mut pause = self.options.leader_retry_delay;
+        let mut retried = 0u32;
+        loop {
+            let error = match self.send_once(&envelope) {
+                Err(e) if e.is_redirect() => e,
+                other => return other,
+            };
+            // A `not_leader` refusal was applied nowhere, so sending it again
+            // cannot apply it twice. A session transaction belongs to this
+            // connection and cannot move.
+            if !self.options.follow_leader
+                || self.txn_open
+                || retried >= self.options.leader_retries
+            {
+                return Err(retried_error(error, retried));
+            }
+            retried += 1;
+            if let Some(hint) = error.leader_hint.as_deref() {
+                if hint != self.address && self.move_to(hint) {
+                    continue;
+                }
+            }
+            std::thread::sleep(pause);
+            pause = (pause * 2).clamp(Duration::from_millis(1), MAX_LEADER_RETRY_DELAY);
+        }
+    }
+
+    /// Replace this connection with one to `address`, opened the way this one
+    /// was. False, leaving this connection untouched, when that fails.
+    fn move_to(&mut self, address: &str) -> bool {
+        let Some((host, port)) = split_address(address) else {
+            return false;
+        };
+        let mut options = self.options.clone();
+        options.host = host.clone();
+        options.port = port;
+        options.connect_timeout = Some(
+            options
+                .connect_timeout
+                .map_or(FOLLOW_CONNECT_TIMEOUT, |t| t.min(FOLLOW_CONNECT_TIMEOUT)),
+        );
+        if let Some(tls) = options.tls.as_mut() {
+            // The leader's certificate is checked against the name the hint gives.
+            tls.server_name = Some(host);
+        }
+        let Ok(mut fresh) = Client::connect(&options) else {
+            return false;
+        };
+        std::mem::swap(&mut self.transport, &mut fresh.transport);
+        self.session_id = fresh.session_id.take();
+        self.granted_features = fresh.granted_features;
+        self.address = address.to_string();
+        // `fresh` now holds the old connection: drop it without a goodbye.
+        fresh.closed = true;
+        fresh.transport.shutdown();
+        true
+    }
+
+    fn send_once(&mut self, envelope: &Value) -> Result<Response> {
+        let frame = self.exchange(Tag::Request, Some(envelope))?;
         match frame.tag {
             Tag::Response => {}
             Tag::Error => {
@@ -498,6 +576,35 @@ impl std::fmt::Debug for Client {
             .field("poisoned", &self.is_poisoned())
             .finish()
     }
+}
+
+/// `host:port` or `[v6]:port`, as a `leader_hint` names it.
+fn split_address(address: &str) -> Option<(String, u16)> {
+    let (host, port) = match address.strip_prefix('[') {
+        Some(rest) => rest.split_once("]:")?,
+        None => address.rsplit_once(':')?,
+    };
+    let port: u16 = port.parse().ok()?;
+    (!host.is_empty() && port != 0).then(|| (host.to_string(), port))
+}
+
+fn join_address(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// The refusal returned after following the leader gave up.
+fn retried_error(mut error: Error, retried: u32) -> Error {
+    if retried > 0 {
+        error.message = format!(
+            "{} (sent again {retried} times, refused each time)",
+            error.message
+        );
+    }
+    error
 }
 
 fn parse_body<T: serde::de::DeserializeOwned>(payload: &[u8], what: &str) -> Result<T> {

@@ -44,7 +44,8 @@
 //! Every fallible call returns [`Error`]. Branch on [`Error::kind`] and
 //! [`Error::code`], never on the message text. A write refused by a follower in
 //! a cluster has [`Error::is_redirect`] true and, when the cluster knows one,
-//! [`Error::leader_hint`]; this client never follows the hint by itself.
+//! [`Error::leader_hint`]. By default the client follows it itself: see
+//! [`Options::follow_leader`].
 //!
 //! # Features
 //!
@@ -79,7 +80,7 @@ pub use crate::document::{
     AccumulatorOp, AggregateStage, Document, DocumentFilter, DocumentIndex, DocumentStats,
     DocumentUpdate, GroupAccumulator, GroupKey, SortKey, UpdateCounts,
 };
-pub use crate::error::{Error, ErrorKind, Result, NOT_LEADER};
+pub use crate::error::{Error, ErrorKind, Result, NOT_LEADER, OUTCOME_UNKNOWN};
 pub use crate::frame::{Frame, Tag, FRAME_VERSION, MAX_CONTROL_PAYLOAD, MAX_DATA_PAYLOAD};
 pub use crate::graph::{
     GraphDirection, GraphEdge, GraphEdgePage, GraphNeighbor, GraphNode, GraphNodePage, GraphPath,
