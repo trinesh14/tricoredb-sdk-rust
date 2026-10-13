@@ -74,18 +74,33 @@ mod transport;
 mod vector;
 mod wire;
 
-pub use crate::cache::{CacheKeyInfo, CachePair, StreamEntry};
+pub use crate::cache::{
+    BitOpKind, CacheCommand, CacheEntry, CacheEvictionStats, CacheExpiry, CacheKeyInfo, CacheLock,
+    CacheLockRenewal, CacheMemoryStats, CachePair, CacheReply, CacheStats, ChannelMessage,
+    CompareAndSwap, ExpireAtOutcome, FreshRead, FreshState, ListEnd, NamespaceLimit,
+    PolledMessages, ScoreBound, ScoredMember, SetCondition, StreamEntry, TrimCounts, WarmCounts,
+    ZAddCounts,
+};
 pub use crate::client::Client;
 pub use crate::document::{
-    AccumulatorOp, AggregateStage, Document, DocumentFilter, DocumentIndex, DocumentStats,
-    DocumentUpdate, GroupAccumulator, GroupKey, SortKey, UpdateCounts,
+    AccumulatorOp, AggregateStage, BulkOp, BulkWriteResult, CollectionOptions, Document,
+    DocumentCommit, DocumentFilter, DocumentIndex, DocumentPlan, DocumentSchema, DocumentStats,
+    DocumentUpdate, ExplainOptions, FieldRule, FieldType, GroupAccumulator, GroupKey, IndexRebuild,
+    PurgeCounts, ReplaceOptions, ReplaceResult, ReturnDocument, SortKey, UpdateCounts,
 };
 pub use crate::error::{Error, ErrorKind, Result, NOT_LEADER, OUTCOME_UNKNOWN};
 pub use crate::frame::{Frame, Tag, FRAME_VERSION, MAX_CONTROL_PAYLOAD, MAX_DATA_PAYLOAD};
 pub use crate::graph::{
-    GraphDirection, GraphEdge, GraphEdgePage, GraphNeighbor, GraphNode, GraphNodePage, GraphPath,
-    GraphRows, GraphTraversal, GraphVisit, NeighborOptions, PathOptions, TraverseOptions,
-    WeightedPathOptions,
+    CentralityMeasure, CentralityOptions, CommunityOptions, ComponentKind, ComponentOptions,
+    ConstraintKind, ConstraintTarget, GraphCentrality, GraphCommunities, GraphComponents,
+    GraphConsistency, GraphConstraint, GraphCounts, GraphCycle, GraphCycleCheck, GraphDirection,
+    GraphEdge, GraphEdgeInput, GraphEdgePage, GraphEdgeTypeSchema, GraphFindings, GraphFoundNodes,
+    GraphGroup, GraphIndex, GraphLabelSchema, GraphMirrorCheck, GraphNeighbor, GraphNode,
+    GraphNodeInput, GraphNodePage, GraphNodeTriangles, GraphPageRank, GraphPath, GraphPathEntry,
+    GraphPaths, GraphPropertySchema, GraphRemoved, GraphRows, GraphSchema, GraphSchemaObjects,
+    GraphScore, GraphStats, GraphSubgraph, GraphTraversal, GraphTriangles, GraphVisit,
+    GraphWriteSummary, KPathOptions, NeighborOptions, NodeUpdate, PageRankOptions, PathOptions,
+    SimilarityMetric, SimilarityOptions, TraverseOptions, WeightedPathOptions,
 };
 pub use crate::llm::{LlmOptions, LlmSource, OutputFormat};
 pub use crate::options::{
@@ -97,6 +112,10 @@ pub use crate::pool::Pool;
 pub use crate::response::Response;
 pub use crate::sql::{Rows, Statement, TransactionResult};
 pub use crate::vector::{
-    VectorCollectionInfo, VectorCollectionSummary, VectorHit, VectorItem, VectorMetric, VectorPage,
-    VectorQuantization, VectorSearchResult,
+    AnnIndex, Embedding, FilterStrategy, FusedHit, FusedSearchResult, FusionMethod, NamedVector,
+    RecallOptions, ScoreMetric, SparseVector, TextUpsert, VectorAlias, VectorCollectionInfo,
+    VectorCollectionSummary, VectorConfig, VectorConfigChange, VectorExample, VectorHit,
+    VectorIndexRebuild, VectorIndexStats, VectorItem, VectorMetric, VectorPage, VectorPartition,
+    VectorPartitions, VectorQuantization, VectorRecall, VectorSearchOptions, VectorSearchResult,
+    VectorUpsert,
 };

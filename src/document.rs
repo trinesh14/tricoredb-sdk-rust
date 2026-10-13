@@ -1,5 +1,7 @@
 //! Documents: collections, filters, updates, indexes and aggregation.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -327,6 +329,388 @@ pub struct UpdateCounts {
     pub modified: i64,
 }
 
+/// Whether a by-id write hands back the document it touched, and which
+/// version of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum ReturnDocument {
+    /// Return no document. The default.
+    #[default]
+    None,
+    /// The document as it was before the write. Absent when there was none —
+    /// an upsert that inserted.
+    Before,
+    /// The document as it is after the write.
+    After,
+}
+
+/// How [`Client::document_replace`] behaves. The default refuses a missing
+/// document, returns no document and checks no version.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReplaceOptions {
+    /// Create the document when it does not exist, rather than refuse.
+    pub upsert: bool,
+    /// Which version of the document to hand back.
+    pub return_document: ReturnDocument,
+    /// Apply only if the document's `_version` is still this. Needs a
+    /// versioned collection; `0` means "must not exist yet".
+    pub expected_version: Option<u64>,
+}
+
+/// What [`Client::document_replace`] did.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ReplaceResult {
+    /// The document's id.
+    #[serde(default)]
+    pub id: String,
+    /// Whether a document now holds the new body.
+    #[serde(default)]
+    pub replaced: bool,
+    /// Whether the document was created by an upsert.
+    #[serde(default)]
+    pub inserted: bool,
+    /// The document asked for with [`ReplaceOptions::return_document`], when
+    /// there is one.
+    #[serde(default)]
+    pub document: Option<Document>,
+}
+
+/// What [`Client::document_purge_expired`] removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct PurgeCounts {
+    /// How many expired documents were deleted.
+    #[serde(default)]
+    pub purged: i64,
+    /// Whether expired documents remain past this call's batch.
+    #[serde(default)]
+    pub more: bool,
+}
+
+/// What [`Client::document_explain`] should run. The default explains an
+/// unbounded, unsorted find.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExplainOptions {
+    /// Cap the documents returned.
+    pub limit: Option<usize>,
+    /// Order the documents.
+    pub sort: Vec<SortKey>,
+    /// Drop this many documents from the front.
+    pub skip: Option<usize>,
+}
+
+/// How a find ran, as [`Client::document_explain`] reports it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DocumentPlan {
+    /// The plan's name: `FindScan`, or an index lookup.
+    #[serde(default)]
+    pub plan: String,
+    /// The index that answered, when one did.
+    #[serde(default)]
+    pub index: Option<String>,
+    /// Whether an index answered.
+    #[serde(default)]
+    pub index_used: bool,
+    /// Why the collection was scanned, when it was.
+    #[serde(default)]
+    pub scan_reason: Option<String>,
+    /// Where a scan read from.
+    #[serde(default)]
+    pub scan_source: Option<String>,
+    /// The planner's estimate of the matching documents.
+    #[serde(default)]
+    pub estimated_rows: f64,
+    /// The planner's cost for the plan it chose.
+    #[serde(default)]
+    pub estimated_cost: f64,
+    /// How many documents were read.
+    #[serde(default)]
+    pub rows_examined: i64,
+    /// How many documents the find returned.
+    #[serde(default)]
+    pub rows_returned: i64,
+    /// How long it took, in microseconds.
+    #[serde(default)]
+    pub elapsed_us: i64,
+}
+
+/// What [`Client::document_rebuild_index`] rebuilt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct IndexRebuild {
+    /// The index that was rebuilt.
+    #[serde(rename = "rebuilt")]
+    pub index_name: String,
+    /// How many documents were read.
+    #[serde(default)]
+    pub documents: i64,
+    /// How many index entries were written.
+    #[serde(default)]
+    pub entries: i64,
+}
+
+/// What [`Client::document_commit_transaction`] landed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct DocumentCommit {
+    /// Whether the transaction committed.
+    #[serde(default)]
+    pub committed: bool,
+    /// How many writes landed with it.
+    #[serde(default)]
+    pub writes: i64,
+}
+
+/// A JSON type a [`FieldRule`] can demand. `Integer` is a number with no
+/// fractional part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldType {
+    /// A string.
+    String,
+    /// Any number.
+    Number,
+    /// A number with no fractional part.
+    Integer,
+    /// `true` or `false`.
+    Boolean,
+    /// An object.
+    Object,
+    /// An array.
+    Array,
+    /// `null`.
+    Null,
+}
+
+/// What one field may hold. Every rule given must pass.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FieldRule {
+    /// The JSON type the value must have.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub field_type: Option<FieldType>,
+    /// The value must equal one of these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub one_of: Vec<Value>,
+    /// The smallest number allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<f64>,
+    /// The largest number allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<f64>,
+    /// The fewest characters of a string, or elements of an array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<usize>,
+    /// The most characters of a string, or elements of an array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<usize>,
+    /// A regular expression a string must contain a match for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+}
+
+impl FieldRule {
+    /// A rule demanding one JSON type.
+    pub fn of_type(field_type: FieldType) -> Self {
+        Self {
+            field_type: Some(field_type),
+            ..Self::default()
+        }
+    }
+}
+
+/// A document shape: required paths, per-path rules, and whether top-level
+/// fields the schema does not name are allowed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentSchema {
+    /// Paths every document must have. A stored `null` counts as present.
+    #[serde(default)]
+    pub required: Vec<String>,
+    /// Path to rule, checked when the path is present.
+    #[serde(default)]
+    pub fields: BTreeMap<String, FieldRule>,
+    /// Whether a top-level field the schema does not name is allowed. `_id`
+    /// and `_version` always are.
+    #[serde(default = "yes")]
+    pub additional_fields: bool,
+}
+
+impl Default for DocumentSchema {
+    fn default() -> Self {
+        Self {
+            required: Vec::new(),
+            fields: BTreeMap::new(),
+            additional_fields: true,
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Rules a collection applies to every document written into it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionOptions {
+    /// Every document written must satisfy this; a violation refuses the
+    /// write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<DocumentSchema>,
+    /// Path to the value a newly created document is given when it lacks the
+    /// path.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub defaults: Map<String, Value>,
+    /// Keep a `_version` counter on every document, which is what lets a write
+    /// name an expected version.
+    #[serde(default)]
+    pub versioned: bool,
+}
+
+/// One operation of [`Client::document_bulk_write`].
+///
+/// ```
+/// use serde_json::json;
+/// use tricoredb::{BulkOp, DocumentUpdate};
+/// let ops = [
+///     BulkOp::insert_with_id("a", json!({"n": 1})),
+///     BulkOp::update_one("a", DocumentUpdate::new().inc("n", 1)),
+///     BulkOp::delete("b"),
+/// ];
+/// # let _ = ops;
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum BulkOp {
+    /// Insert a document, under `id` when one is given.
+    Insert {
+        /// The id to insert under. `None` uses the document's `_id`, or
+        /// generates one.
+        id: Option<String>,
+        /// The document, which must be a JSON object.
+        document: Value,
+    },
+    /// Apply an update to one document by id.
+    UpdateOne {
+        /// The document's id.
+        id: String,
+        /// The changes to make.
+        update: DocumentUpdate,
+        /// Create the document from the update when it does not exist.
+        upsert: bool,
+        /// Apply only if the document's `_version` is still this.
+        expected_version: Option<u64>,
+    },
+    /// Swap one document's whole body.
+    Replace {
+        /// The document's id.
+        id: String,
+        /// The new body, which must be a JSON object.
+        document: Value,
+        /// Create the document when it does not exist.
+        upsert: bool,
+        /// Apply only if the document's `_version` is still this.
+        expected_version: Option<u64>,
+    },
+    /// Delete one document by id.
+    Delete {
+        /// The document's id.
+        id: String,
+        /// Apply only if the document's `_version` is still this.
+        expected_version: Option<u64>,
+    },
+}
+
+impl BulkOp {
+    /// Insert a document under its own `_id`, or a generated one.
+    pub fn insert(document: impl Into<Value>) -> Self {
+        BulkOp::Insert {
+            id: None,
+            document: document.into(),
+        }
+    }
+
+    /// Insert a document under an id you choose.
+    pub fn insert_with_id(id: &str, document: impl Into<Value>) -> Self {
+        BulkOp::Insert {
+            id: Some(id.to_string()),
+            document: document.into(),
+        }
+    }
+
+    /// Apply an update to one document by id.
+    pub fn update_one(id: &str, update: DocumentUpdate) -> Self {
+        BulkOp::UpdateOne {
+            id: id.to_string(),
+            update,
+            upsert: false,
+            expected_version: None,
+        }
+    }
+
+    /// Swap one document's whole body.
+    pub fn replace(id: &str, document: impl Into<Value>) -> Self {
+        BulkOp::Replace {
+            id: id.to_string(),
+            document: document.into(),
+            upsert: false,
+            expected_version: None,
+        }
+    }
+
+    /// Delete one document by id.
+    pub fn delete(id: &str) -> Self {
+        BulkOp::Delete {
+            id: id.to_string(),
+            expected_version: None,
+        }
+    }
+
+    /// Create the document when it does not exist. Changes nothing on an
+    /// insert or a delete, which have no such choice.
+    pub fn upsert(mut self) -> Self {
+        if let BulkOp::UpdateOne { upsert, .. } | BulkOp::Replace { upsert, .. } = &mut self {
+            *upsert = true;
+        }
+        self
+    }
+
+    /// Apply only if the document's `_version` is still `version`, compared
+    /// with the version it had before the batch. Changes nothing on an insert.
+    pub fn expected_version(mut self, version: u64) -> Self {
+        match &mut self {
+            BulkOp::UpdateOne {
+                expected_version, ..
+            }
+            | BulkOp::Replace {
+                expected_version, ..
+            }
+            | BulkOp::Delete {
+                expected_version, ..
+            } => *expected_version = Some(version),
+            BulkOp::Insert { .. } => {}
+        }
+        self
+    }
+}
+
+/// What [`Client::document_bulk_write`] applied.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct BulkWriteResult {
+    /// Documents inserted.
+    #[serde(default)]
+    pub inserted: i64,
+    /// Documents updated.
+    #[serde(default)]
+    pub updated: i64,
+    /// Documents created by an upsert.
+    #[serde(default)]
+    pub upserted: i64,
+    /// Documents replaced.
+    #[serde(default)]
+    pub replaced: i64,
+    /// Documents deleted.
+    #[serde(default)]
+    pub deleted: i64,
+    /// The ids of the inserted documents, in the order their operations were
+    /// given.
+    #[serde(default)]
+    pub inserted_ids: Vec<String>,
+}
+
 fn op(body: Value) -> Value {
     json!({"Document": body})
 }
@@ -613,6 +997,251 @@ impl Client {
         }})))?;
         documents_of(&response, "Aggregate")
     }
+
+    /// Swap a document's whole body for a new one.
+    ///
+    /// [`Client::document_update`] merges, so a field left out survives; after
+    /// a replace the stored body is exactly `document` plus `_id`. An `_id`
+    /// inside `document` may agree with `id` or be absent, never disagree.
+    pub fn document_replace(
+        &mut self,
+        collection: &str,
+        id: &str,
+        document: &impl Serialize,
+        options: &ReplaceOptions,
+    ) -> Result<ReplaceResult> {
+        let mut body = Map::new();
+        body.insert("collection".into(), json!(collection));
+        body.insert("id".into(), json!(id));
+        body.insert("document".into(), object_value(document)?);
+        body.insert("upsert".into(), json!(options.upsert));
+        if options.return_document != ReturnDocument::None {
+            body.insert("return".into(), json!(options.return_document));
+        }
+        if let Some(version) = options.expected_version {
+            body.insert("expected_version".into(), json!(version));
+        }
+        let response = self.send(op(json!({"Replace": Value::Object(body)})))?;
+        response.decode("Replace")
+    }
+
+    /// Insert several documents as one atomic batch — every document lands or
+    /// none does — and return their ids in order.
+    ///
+    /// Each document's id is its own `_id` when it carries one, and is
+    /// generated otherwise.
+    pub fn document_insert_many(
+        &mut self,
+        collection: &str,
+        documents: &[impl Serialize],
+    ) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Inserted {
+            #[serde(default)]
+            ids: Vec<String>,
+        }
+        let documents = documents
+            .iter()
+            .map(object_value)
+            .collect::<Result<Vec<Value>>>()?;
+        let response = self.send(op(json!({"InsertMany": {
+            "collection": collection,
+            "documents": documents,
+        }})))?;
+        let out: Inserted = response.decode("InsertMany")?;
+        Ok(out.ids)
+    }
+
+    /// Delete every document matching a filter, returning how many went.
+    pub fn document_delete_many(
+        &mut self,
+        collection: &str,
+        filter: &DocumentFilter,
+    ) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct Deleted {
+            #[serde(default)]
+            deleted: i64,
+        }
+        let response = self.send(op(json!({"DeleteMany": {
+            "collection": collection,
+            "filter": filter,
+        }})))?;
+        let out: Deleted = response.decode("DeleteMany")?;
+        Ok(out.deleted)
+    }
+
+    /// Move a collection, with its documents and indexes, to a new name.
+    /// Refused when `to` already exists.
+    pub fn document_rename_collection(&mut self, collection: &str, to: &str) -> Result<()> {
+        self.send(op(json!({"RenameCollection": {
+            "collection": collection,
+            "to": to,
+        }})))
+        .map(|_| ())
+    }
+
+    /// Delete the documents a TTL index says have expired, now.
+    pub fn document_purge_expired(&mut self, collection: &str) -> Result<PurgeCounts> {
+        let response = self.send(op(json!({"PurgeExpired": {"collection": collection}})))?;
+        response.decode("PurgeExpired")
+    }
+
+    /// Run a find and describe how it ran instead of returning its documents.
+    pub fn document_explain(
+        &mut self,
+        collection: &str,
+        filter: &DocumentFilter,
+        options: &ExplainOptions,
+    ) -> Result<DocumentPlan> {
+        let mut body = Map::new();
+        body.insert("collection".into(), json!(collection));
+        body.insert("filter".into(), json!(filter));
+        if let Some(limit) = options.limit {
+            body.insert("limit".into(), json!(limit));
+        }
+        if !options.sort.is_empty() {
+            body.insert("sort".into(), json!(options.sort));
+        }
+        if let Some(skip) = options.skip {
+            body.insert("skip".into(), json!(skip));
+        }
+        let response = self.send(op(json!({"Explain": Value::Object(body)})))?;
+        response.decode("Explain")
+    }
+
+    /// Open a transaction spanning requests, and return its id.
+    ///
+    /// Nothing joins the transaction by itself: pass the id to
+    /// [`Client::set_request_txn`], and every later request reads and writes
+    /// inside it, seeing its own writes and nobody else's since it began. With
+    /// `serializable`, its reads are validated at commit as well.
+    ///
+    /// ```no_run
+    /// # fn main() -> tricoredb::Result<()> {
+    /// # let mut db = tricoredb::Client::connect(&tricoredb::Options::default())?;
+    /// use serde_json::json;
+    /// let txn = db.document_begin_transaction(false)?;
+    /// db.set_request_txn(Some(&txn));
+    /// db.document_insert_with_id("orders", "o1", &json!({"total": 10}))?;
+    /// db.document_commit_transaction(&txn)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn document_begin_transaction(&mut self, serializable: bool) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Begun {
+            #[serde(default)]
+            txn: String,
+        }
+        let response = self.send_in(
+            op(json!({"BeginTransaction": {"serializable": serializable}})),
+            None,
+        )?;
+        let out: Begun = response.decode("BeginTransaction")?;
+        if out.txn.is_empty() {
+            return Err(Error::protocol(
+                "BeginTransaction answered with no transaction id",
+            ));
+        }
+        Ok(out.txn)
+    }
+
+    /// Commit a transaction: every write lands as one atomic batch, or a
+    /// conflict is returned and nothing lands.
+    ///
+    /// Clears [`Client::set_request_txn`] when it names this transaction,
+    /// whatever the outcome: a transaction that failed to commit is over.
+    pub fn document_commit_transaction(&mut self, txn: &str) -> Result<DocumentCommit> {
+        let outcome = self.send_in(op(json!("CommitTransaction")), Some(txn));
+        self.forget_txn(txn);
+        outcome?.decode("CommitTransaction")
+    }
+
+    /// Discard a transaction and everything written inside it.
+    pub fn document_rollback_transaction(&mut self, txn: &str) -> Result<()> {
+        let outcome = self.send_in(op(json!("RollbackTransaction")), Some(txn));
+        self.forget_txn(txn);
+        outcome.map(|_| ())
+    }
+
+    /// Rebuild one index from the stored documents, replacing its entries in
+    /// one batch.
+    pub fn document_rebuild_index(
+        &mut self,
+        collection: &str,
+        index_name: &str,
+    ) -> Result<IndexRebuild> {
+        let response = self.send(op(json!({"RebuildIndex": {
+            "collection": collection,
+            "index_name": index_name,
+        }})))?;
+        response.decode("RebuildIndex")
+    }
+
+    /// Set a collection's options, replacing any it had, and return how many
+    /// stored documents were checked against the new schema. Refused when an
+    /// existing document would break it.
+    pub fn document_set_collection_options(
+        &mut self,
+        collection: &str,
+        options: &CollectionOptions,
+    ) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct Updated {
+            #[serde(default)]
+            documents_checked: i64,
+        }
+        let response = self.send(op(json!({"SetCollectionOptions": {
+            "collection": collection,
+            "options": options,
+        }})))?;
+        let out: Updated = response.decode("SetCollectionOptions")?;
+        Ok(out.documents_checked)
+    }
+
+    /// Read a collection's options.
+    pub fn document_get_collection_options(
+        &mut self,
+        collection: &str,
+    ) -> Result<CollectionOptions> {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default)]
+            options: CollectionOptions,
+        }
+        let response = self.send(op(
+            json!({"GetCollectionOptions": {"collection": collection}}),
+        ))?;
+        let out: Wire = response.decode("GetCollectionOptions")?;
+        Ok(out.options)
+    }
+
+    /// Many inserts, updates, replaces and deletes on one collection, applied
+    /// in order as one atomic batch: every operation lands or none does. A
+    /// later operation sees the effect of an earlier one on the same id.
+    pub fn document_bulk_write(
+        &mut self,
+        collection: &str,
+        ops: &[BulkOp],
+    ) -> Result<BulkWriteResult> {
+        let response = self.send(op(json!({"BulkWrite": {
+            "collection": collection,
+            "ops": ops,
+        }})))?;
+        response.decode("BulkWrite")
+    }
+}
+
+/// A document as the JSON object it must be.
+fn object_value(document: &impl Serialize) -> Result<Value> {
+    let document = serde_json::to_value(document)
+        .map_err(|e| Error::invalid(format!("the document cannot be encoded as JSON: {e}")))?;
+    if !document.is_object() {
+        return Err(Error::invalid(
+            "a document must encode to a JSON object, not a scalar or an array",
+        ));
+    }
+    Ok(document)
 }
 
 #[derive(Deserialize)]

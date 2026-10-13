@@ -1,10 +1,12 @@
 //! Graphs: labelled nodes, typed edges, traversal, paths and Cypher.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::client::Client;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Which edges of a node an operation follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -262,6 +264,731 @@ pub struct WeightedPathOptions {
     /// missing it, or holding something that is not a number, weighs 1.0; a
     /// negative weight is refused rather than solved wrongly.
     pub weight_property: Option<String>,
+}
+
+/// How [`Client::graph_connected_components`] groups nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentKind {
+    /// Ignore edge direction. The default.
+    #[default]
+    Weak,
+    /// Group nodes that can each reach the other along edge direction.
+    Strong,
+}
+
+/// The rule a constraint enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintKind {
+    /// No two records with the label share a value for the property.
+    Unique,
+    /// Every record with the label has the property.
+    Required,
+}
+
+/// What a constraint applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintTarget {
+    /// Nodes carrying the label. The default.
+    #[default]
+    Node,
+    /// Relationships of that type.
+    Edge,
+}
+
+/// The measure [`Client::graph_centrality`] computes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CentralityMeasure {
+    /// How often a node lies on a shortest path between two others.
+    Betweenness,
+    /// How near a node is to every other.
+    Closeness,
+    /// How well connected a node's neighbours are.
+    Eigenvector,
+}
+
+/// How [`Client::graph_node_similarity`] compares neighbour sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimilarityMetric {
+    /// Shared neighbours over all neighbours. The default.
+    #[default]
+    Jaccard,
+    /// Shared neighbours over the smaller set.
+    Overlap,
+}
+
+/// One node of [`Client::graph_add_many`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GraphNodeInput {
+    /// The node's id.
+    pub id: String,
+    /// Its labels.
+    pub labels: Vec<String>,
+    /// Its properties.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Map<String, Value>>,
+}
+
+impl GraphNodeInput {
+    /// A node with these labels and no properties.
+    pub fn new(id: &str, labels: &[&str]) -> Self {
+        Self {
+            id: id.to_string(),
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            properties: None,
+        }
+    }
+
+    /// Attach properties.
+    pub fn properties(mut self, properties: Map<String, Value>) -> Self {
+        self.properties = Some(properties);
+        self
+    }
+}
+
+/// One edge of [`Client::graph_add_many`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GraphEdgeInput {
+    /// The edge's id.
+    pub id: String,
+    /// The node it leaves.
+    pub from: String,
+    /// The node it enters.
+    pub to: String,
+    /// Its label.
+    pub label: String,
+    /// Its properties.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Map<String, Value>>,
+}
+
+impl GraphEdgeInput {
+    /// An edge with no properties.
+    pub fn new(id: &str, from: &str, to: &str, label: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            label: label.to_string(),
+            properties: None,
+        }
+    }
+
+    /// Attach properties.
+    pub fn properties(mut self, properties: Map<String, Value>) -> Self {
+        self.properties = Some(properties);
+        self
+    }
+}
+
+/// How many nodes and edges a batch write or a copy handled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct GraphCounts {
+    /// How many nodes.
+    #[serde(default)]
+    pub nodes: i64,
+    /// How many edges.
+    #[serde(default)]
+    pub edges: i64,
+}
+
+/// What [`Client::graph_remove_many`] deleted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct GraphRemoved {
+    /// How many nodes went.
+    #[serde(default)]
+    pub nodes_removed: i64,
+    /// How many edges went, those detached with a node included.
+    #[serde(default)]
+    pub edges_removed: i64,
+}
+
+/// What [`Client::graph_update_node`] should change. The default changes
+/// nothing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeUpdate {
+    /// A JSON merge patch for the properties: a key set to a value is set, a
+    /// key set to `null` is removed, and a key left out is left alone.
+    pub properties: Option<Value>,
+    /// Labels to add. Adding one the node already has is a no-op.
+    pub add_labels: Vec<String>,
+    /// Labels to remove, applied before the additions.
+    pub remove_labels: Vec<String>,
+}
+
+/// What [`Client::graph_connected_components`] should consider.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComponentOptions {
+    /// Weak or strong connectivity. `None` leaves it to the server (weak).
+    pub kind: Option<ComponentKind>,
+    /// Consider only edges with this label.
+    pub label: Option<String>,
+    /// Cap the components listed, never the number counted. The server's
+    /// default is 100, capped at 1000.
+    pub limit: Option<usize>,
+}
+
+/// One group of nodes: a connected component, or a community.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphGroup {
+    /// The ids of its nodes.
+    #[serde(default)]
+    pub nodes: Vec<String>,
+    /// How many nodes it has, which may be more than are listed.
+    #[serde(default)]
+    pub size: usize,
+    /// Whether the node list was cut short.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// The connected components of a graph, largest first.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphComponents {
+    /// The connectivity that was computed.
+    #[serde(default)]
+    pub kind: ComponentKind,
+    /// How many components the graph has.
+    #[serde(default)]
+    pub count: usize,
+    /// The size of the largest.
+    #[serde(default)]
+    pub largest: usize,
+    /// Whether more components exist than are listed.
+    #[serde(default)]
+    pub truncated: bool,
+    /// The components listed.
+    #[serde(default)]
+    pub components: Vec<GraphGroup>,
+}
+
+/// One cycle, as the evidence [`Client::graph_detect_cycle`] returns.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphCycle {
+    /// The node ids around the cycle.
+    #[serde(default)]
+    pub nodes: Vec<String>,
+    /// The edge ids around the cycle.
+    #[serde(default)]
+    pub edges: Vec<String>,
+}
+
+/// The answer to [`Client::graph_detect_cycle`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphCycleCheck {
+    /// Whether the graph contains a cycle.
+    #[serde(default, rename = "hasCycle")]
+    pub has_cycle: bool,
+    /// Whether edge direction was followed.
+    #[serde(default)]
+    pub directed: bool,
+    /// One cycle, when there is one.
+    #[serde(default)]
+    pub cycle: Option<GraphCycle>,
+}
+
+/// Counts describing a graph.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphStats {
+    /// How many nodes.
+    #[serde(default)]
+    pub nodes: i64,
+    /// How many edges.
+    #[serde(default)]
+    pub edges: i64,
+    /// Nodes per label.
+    #[serde(default)]
+    pub node_labels: BTreeMap<String, i64>,
+    /// Edges per type.
+    #[serde(default)]
+    pub edge_types: BTreeMap<String, i64>,
+    /// Nodes with no label.
+    #[serde(default)]
+    pub unlabeled_nodes: i64,
+    /// Edges from a node to itself.
+    #[serde(default)]
+    pub self_loops: i64,
+    /// Nodes with no edge.
+    #[serde(default)]
+    pub isolated_nodes: i64,
+    /// The mean number of outgoing edges per node.
+    #[serde(default)]
+    pub avg_out_degree: f64,
+    /// The most outgoing edges any node has.
+    #[serde(default)]
+    pub max_out_degree: i64,
+    /// The most incoming edges any node has.
+    #[serde(default)]
+    pub max_in_degree: i64,
+    /// Edges whose endpoint no longer exists.
+    #[serde(default)]
+    pub dangling_edges: i64,
+}
+
+/// The part of a graph around some seed nodes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphSubgraph {
+    /// The direction that was followed.
+    #[serde(default)]
+    pub direction: String,
+    /// The hop bound the server applied.
+    #[serde(default)]
+    pub max_depth: usize,
+    /// The node bound the server applied.
+    #[serde(default)]
+    pub limit: usize,
+    /// How many nodes came back.
+    #[serde(default)]
+    pub node_count: usize,
+    /// How many edges came back.
+    #[serde(default)]
+    pub edge_count: usize,
+    /// The nodes reached, each with the depth it was reached at.
+    #[serde(default, deserialize_with = "crate::serde_null::or_default")]
+    pub nodes: Vec<GraphVisit>,
+    /// Every edge joining two of those nodes.
+    #[serde(default, deserialize_with = "crate::serde_null::or_default")]
+    pub edges: Vec<GraphEdge>,
+    /// Whether the node bound cut the walk short.
+    #[serde(default)]
+    pub nodes_truncated: bool,
+    /// Whether the edge list was cut short.
+    #[serde(default)]
+    pub edges_truncated: bool,
+}
+
+/// One property key seen on a label or an edge type.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphPropertySchema {
+    /// The property key.
+    pub key: String,
+    /// How many records carry it.
+    #[serde(default)]
+    pub count: i64,
+    /// The JSON types seen under it.
+    #[serde(default)]
+    pub types: Vec<String>,
+}
+
+/// One node label, or the unlabelled nodes, in a [`GraphSchema`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct GraphLabelSchema {
+    /// The label. Empty for the unlabelled nodes.
+    #[serde(default)]
+    pub label: String,
+    /// How many nodes carry it.
+    #[serde(default)]
+    pub count: i64,
+    /// The property keys seen on them.
+    #[serde(default)]
+    pub properties: Vec<GraphPropertySchema>,
+}
+
+/// One edge type in a [`GraphSchema`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphEdgeTypeSchema {
+    /// The edge type.
+    #[serde(rename = "type")]
+    pub edge_type: String,
+    /// How many edges have it.
+    #[serde(default)]
+    pub count: i64,
+    /// The property keys seen on them.
+    #[serde(default)]
+    pub properties: Vec<GraphPropertySchema>,
+}
+
+/// What a graph's data looks like.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphSchema {
+    /// How many nodes the graph holds.
+    #[serde(default)]
+    pub nodes: i64,
+    /// How many edges the graph holds.
+    #[serde(default)]
+    pub edges: i64,
+    /// Each node label.
+    #[serde(default)]
+    pub node_labels: Vec<GraphLabelSchema>,
+    /// Each edge type.
+    #[serde(default)]
+    pub edge_types: Vec<GraphEdgeTypeSchema>,
+    /// The nodes that carry no label.
+    #[serde(default)]
+    pub unlabeled_nodes: GraphLabelSchema,
+}
+
+/// What [`Client::graph_k_shortest_paths`] should search.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KPathOptions {
+    /// How many paths to return. The server's default is 3, capped at 20.
+    pub k: Option<usize>,
+    /// Which edges to follow.
+    pub direction: Option<GraphDirection>,
+    /// Keep only edges with this label.
+    pub label: Option<String>,
+    /// The edge property holding the cost. Without it every edge costs 1, so
+    /// paths are ranked by hops.
+    pub weight_property: Option<String>,
+}
+
+/// One path of a [`GraphPaths`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphPathEntry {
+    /// The node ids along the path, the start first.
+    #[serde(default)]
+    pub nodes: Vec<String>,
+    /// The edge ids along the path.
+    #[serde(default)]
+    pub edges: Vec<String>,
+    /// How many edges the path has.
+    #[serde(default)]
+    pub hops: usize,
+    /// The summed cost of its edges.
+    #[serde(default)]
+    pub cost: f64,
+}
+
+/// Several paths between two nodes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphPaths {
+    /// The start node.
+    #[serde(default)]
+    pub from: String,
+    /// The target node.
+    #[serde(default)]
+    pub to: String,
+    /// The direction that was followed.
+    #[serde(default)]
+    pub direction: String,
+    /// How many paths came back.
+    #[serde(default)]
+    pub count: usize,
+    /// The paths.
+    #[serde(default)]
+    pub paths: Vec<GraphPathEntry>,
+    /// For [`Client::graph_all_paths`], whether the enumeration finished.
+    /// `None` from a search that does not report it.
+    #[serde(default)]
+    pub complete: Option<bool>,
+    /// What stopped an enumeration that did not finish.
+    #[serde(default)]
+    pub stopped_by: Option<String>,
+}
+
+/// What [`Client::graph_centrality`] should compute over.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CentralityOptions {
+    /// Follow edge direction. `None` leaves it to the server, which does.
+    pub directed: Option<bool>,
+    /// Consider only edges with this label.
+    pub label: Option<String>,
+    /// How many nodes to return. The server's default is 20, capped at 1000.
+    pub limit: Option<usize>,
+    /// The iteration bound. Eigenvector only.
+    pub iterations: Option<usize>,
+    /// The change below which iteration stops. Eigenvector only.
+    pub tolerance: Option<f64>,
+}
+
+/// One node and the score an algorithm gave it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphScore {
+    /// The node's id.
+    pub id: String,
+    /// Its score.
+    #[serde(default)]
+    pub score: f64,
+}
+
+/// The answer to [`Client::graph_centrality`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphCentrality {
+    /// The measure that was computed.
+    pub measure: CentralityMeasure,
+    /// Whether edge direction was followed.
+    #[serde(default)]
+    pub directed: bool,
+    /// How many nodes the graph holds.
+    #[serde(default)]
+    pub nodes: i64,
+    /// The top nodes, highest first.
+    #[serde(default)]
+    pub results: Vec<GraphScore>,
+    /// Whether iteration converged. Eigenvector only.
+    #[serde(default)]
+    pub converged: Option<bool>,
+    /// How many iterations ran. Eigenvector only.
+    #[serde(default)]
+    pub iterations: Option<usize>,
+}
+
+/// What [`Client::graph_communities`] should consider.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommunityOptions {
+    /// Consider only edges with this label.
+    pub label: Option<String>,
+    /// The iteration bound.
+    pub iterations: Option<usize>,
+    /// Cap the communities listed.
+    pub limit: Option<usize>,
+}
+
+/// The communities of a graph, largest first.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphCommunities {
+    /// The algorithm that found them.
+    #[serde(default)]
+    pub algorithm: String,
+    /// How many communities there are.
+    #[serde(default)]
+    pub count: usize,
+    /// The partition's modularity.
+    #[serde(default)]
+    pub modularity: f64,
+    /// Whether the optimisation converged.
+    #[serde(default)]
+    pub converged: bool,
+    /// How many passes it ran.
+    #[serde(default)]
+    pub iterations: usize,
+    /// The communities listed.
+    #[serde(default)]
+    pub communities: Vec<GraphGroup>,
+}
+
+/// One node's triangles.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphNodeTriangles {
+    /// The node's id.
+    pub id: String,
+    /// How many triangles it is a corner of.
+    #[serde(default)]
+    pub triangles: i64,
+    /// Its local clustering coefficient.
+    #[serde(default)]
+    pub clustering: f64,
+}
+
+/// The answer to [`Client::graph_triangle_count`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphTriangles {
+    /// How many triangles the graph has.
+    #[serde(default)]
+    pub triangles: i64,
+    /// The graph's transitivity.
+    #[serde(default)]
+    pub transitivity: f64,
+    /// The mean local clustering coefficient.
+    #[serde(default)]
+    pub average_clustering: f64,
+    /// The per-node counts listed.
+    #[serde(default)]
+    pub nodes: Vec<GraphNodeTriangles>,
+}
+
+/// What [`Client::graph_node_similarity`] should compare.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SimilarityOptions {
+    /// Which edges define a node's neighbours. The server's default is both.
+    pub direction: Option<GraphDirection>,
+    /// Consider only edges with this label.
+    pub label: Option<String>,
+    /// How to compare neighbour sets. The server's default is Jaccard.
+    pub metric: Option<SimilarityMetric>,
+    /// Cap the nodes returned.
+    pub limit: Option<usize>,
+}
+
+/// One class of finding in a [`GraphConsistency`].
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct GraphFindings {
+    /// How many were found.
+    #[serde(default)]
+    pub count: i64,
+    /// The ones listed, as the server describes them.
+    #[serde(default)]
+    pub listed: Vec<Value>,
+}
+
+/// How the resident mirror compares with storage.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct GraphMirrorCheck {
+    /// Whether the mirror was loaded and so could be compared.
+    #[serde(default)]
+    pub loaded: bool,
+    /// Where mirror and storage disagree.
+    #[serde(default)]
+    pub differences: GraphFindings,
+}
+
+/// The answer to [`Client::graph_check_consistency`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphConsistency {
+    /// Whether nothing was found.
+    #[serde(default)]
+    pub consistent: bool,
+    /// How many nodes were checked.
+    #[serde(default)]
+    pub nodes: i64,
+    /// How many edges were checked.
+    #[serde(default)]
+    pub edges: i64,
+    /// Edges whose endpoint no longer exists.
+    #[serde(default)]
+    pub dangling_edges: GraphFindings,
+    /// Records that could not be decoded.
+    #[serde(default)]
+    pub undecodable: GraphFindings,
+    /// Records stored under another id.
+    #[serde(default)]
+    pub misfiled: GraphFindings,
+    /// The resident mirror against storage.
+    #[serde(default)]
+    pub mirror: GraphMirrorCheck,
+}
+
+/// One node index.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphIndex {
+    /// The index's name.
+    pub name: String,
+    /// The label it is limited to, when it is.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The properties it indexes.
+    #[serde(default)]
+    pub properties: Vec<String>,
+}
+
+/// One constraint.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphConstraint {
+    /// The constraint's name.
+    pub name: String,
+    /// The label it applies to.
+    #[serde(default)]
+    pub label: String,
+    /// The property it rules.
+    #[serde(default)]
+    pub property: String,
+    /// The rule.
+    pub kind: ConstraintKind,
+    /// Whether it applies to nodes or relationships.
+    #[serde(default)]
+    pub target: ConstraintTarget,
+}
+
+/// A graph's indexes and constraints.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct GraphSchemaObjects {
+    /// The node indexes.
+    #[serde(default)]
+    pub indexes: Vec<GraphIndex>,
+    /// The constraints.
+    #[serde(default)]
+    pub constraints: Vec<GraphConstraint>,
+}
+
+/// The answer to [`Client::graph_find_nodes`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphFoundNodes {
+    /// How many nodes came back.
+    #[serde(default)]
+    pub count: usize,
+    /// The nodes, in id order.
+    #[serde(default, deserialize_with = "crate::serde_null::or_default")]
+    pub nodes: Vec<GraphNode>,
+    /// How the request was answered: an index by name, the label index, or a
+    /// scan.
+    #[serde(default)]
+    pub plan: String,
+    /// Whether the limit cut the result short.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// What [`Client::graph_page_rank`] should compute.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PageRankOptions {
+    /// The damping factor, in `[0, 1)`. The server's default is 0.85.
+    pub damping: Option<f64>,
+    /// The iteration bound. The server's default is 20, capped at 100.
+    pub iterations: Option<usize>,
+    /// The total change below which iteration stops.
+    pub tolerance: Option<f64>,
+    /// Follow only edges with this label.
+    pub label: Option<String>,
+    /// How many nodes to return. The server's default is 20, capped at 1000.
+    pub limit: Option<usize>,
+}
+
+/// The answer to [`Client::graph_page_rank`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GraphPageRank {
+    /// The top nodes by rank. The ranks of the whole graph sum to 1.
+    #[serde(default)]
+    pub ranks: Vec<GraphScore>,
+    /// How many nodes were ranked.
+    #[serde(default)]
+    pub count: usize,
+    /// The damping factor that was applied.
+    #[serde(default)]
+    pub damping: f64,
+    /// How many iterations ran.
+    #[serde(default)]
+    pub iterations: usize,
+    /// Whether iteration converged before its bound.
+    #[serde(default)]
+    pub converged: bool,
+    /// Whether more nodes were ranked than are listed.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// What a Cypher write changed.
+///
+/// Inside a transaction a statement is queued rather than applied: the counts
+/// are then zero and [`GraphWriteSummary::queued`] says how many statements the
+/// transaction holds.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphWriteSummary {
+    /// How many statements ran.
+    #[serde(default)]
+    pub statements: i64,
+    /// Nodes created.
+    #[serde(default)]
+    pub nodes_created: i64,
+    /// Nodes deleted.
+    #[serde(default)]
+    pub nodes_deleted: i64,
+    /// Relationships created.
+    #[serde(default)]
+    pub relationships_created: i64,
+    /// Relationships deleted.
+    #[serde(default)]
+    pub relationships_deleted: i64,
+    /// Properties set.
+    #[serde(default)]
+    pub properties_set: i64,
+    /// Labels added.
+    #[serde(default)]
+    pub labels_added: i64,
+    /// Labels removed.
+    #[serde(default)]
+    pub labels_removed: i64,
+    /// Inside a transaction, how many statements it now holds.
+    #[serde(default)]
+    pub queued: Option<i64>,
+    /// At a commit, how many queued statements were applied.
+    #[serde(default)]
+    pub committed: Option<i64>,
 }
 
 fn op(body: Value) -> Value {
@@ -532,6 +1259,477 @@ impl Client {
         let response = self.send(op(json!({"Query": {"graph": graph, "cypher": cypher}})))?;
         response.decode("Query")
     }
+
+    /// Write many nodes and edges as one unit: every record lands or none
+    /// does.
+    ///
+    /// Nodes are written before edges, so an edge may join nodes created in
+    /// the same batch. The whole batch is validated before anything is
+    /// written.
+    pub fn graph_add_many(
+        &mut self,
+        graph: &str,
+        nodes: &[GraphNodeInput],
+        edges: &[GraphEdgeInput],
+    ) -> Result<GraphCounts> {
+        let response = self.send(op(json!({"AddMany": {
+            "graph": graph,
+            "nodes": nodes,
+            "edges": edges,
+        }})))?;
+        response.decode("AddMany")
+    }
+
+    /// Delete many nodes and edges as one unit. An id that is not there is
+    /// skipped. With `detach`, every edge touching a removed node goes too.
+    pub fn graph_remove_many(
+        &mut self,
+        graph: &str,
+        nodes: &[&str],
+        edges: &[&str],
+        detach: bool,
+    ) -> Result<GraphRemoved> {
+        let response = self.send(op(json!({"RemoveMany": {
+            "graph": graph,
+            "nodes": nodes,
+            "edges": edges,
+            "detach": detach,
+        }})))?;
+        response.decode("RemoveMany")
+    }
+
+    /// Change an existing node in place, and return it as it now stands.
+    pub fn graph_update_node(
+        &mut self,
+        graph: &str,
+        id: &str,
+        update: &NodeUpdate,
+    ) -> Result<GraphNode> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        body.insert("id".into(), json!(id));
+        put(&mut body, "properties", update.properties.clone());
+        if !update.add_labels.is_empty() {
+            body.insert("add_labels".into(), json!(update.add_labels));
+        }
+        if !update.remove_labels.is_empty() {
+            body.insert("remove_labels".into(), json!(update.remove_labels));
+        }
+        let response = self.send(op(json!({"UpdateNode": Value::Object(body)})))?;
+        response.decode("UpdateNode")
+    }
+
+    /// Change an existing edge in place, and return it as it now stands.
+    /// `properties` is a JSON merge patch and `label` changes the edge's type;
+    /// the endpoints cannot change.
+    pub fn graph_update_edge(
+        &mut self,
+        graph: &str,
+        id: &str,
+        properties: Option<&Value>,
+        label: Option<&str>,
+    ) -> Result<GraphEdge> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        body.insert("id".into(), json!(id));
+        put(&mut body, "properties", properties.cloned());
+        put(&mut body, "label", label);
+        let response = self.send(op(json!({"UpdateEdge": Value::Object(body)})))?;
+        response.decode("UpdateEdge")
+    }
+
+    /// Copy a graph — nodes, edges and schema — to a new name. Refused when
+    /// `to` exists.
+    pub fn graph_copy(&mut self, graph: &str, to: &str) -> Result<GraphCounts> {
+        let response = self.send(op(json!({"CopyGraph": {"graph": graph, "to": to}})))?;
+        response.decode("CopyGraph")
+    }
+
+    /// Walk outward from a node depth-first. Returns exactly the nodes
+    /// [`Client::graph_traverse`] does, in DFS preorder.
+    pub fn graph_dfs(
+        &mut self,
+        graph: &str,
+        start: &str,
+        options: &TraverseOptions,
+    ) -> Result<GraphTraversal> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        body.insert("start".into(), json!(start));
+        put_walk(&mut body, options);
+        let response = self.send(op(json!({"Dfs": Value::Object(body)})))?;
+        response.decode("Dfs")
+    }
+
+    /// Partition the graph's nodes into connected components, largest first.
+    pub fn graph_connected_components(
+        &mut self,
+        graph: &str,
+        options: &ComponentOptions,
+    ) -> Result<GraphComponents> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        put(&mut body, "kind", options.kind.map(|k| json!(k)));
+        put(&mut body, "label", options.label.clone());
+        put(&mut body, "limit", options.limit);
+        let response = self.send(op(json!({"ConnectedComponents": Value::Object(body)})))?;
+        response.decode("ConnectedComponents")
+    }
+
+    /// Whether the graph contains a cycle, with one cycle as evidence.
+    ///
+    /// `directed` of `None` leaves it to the server, which follows edge
+    /// direction. Undirected, two parallel edges between a pair are a cycle
+    /// and a single edge is not.
+    pub fn graph_detect_cycle(
+        &mut self,
+        graph: &str,
+        directed: Option<bool>,
+        label: Option<&str>,
+    ) -> Result<GraphCycleCheck> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        put(&mut body, "directed", directed);
+        put(&mut body, "label", label);
+        let response = self.send(op(json!({"DetectCycle": Value::Object(body)})))?;
+        response.decode("DetectCycle")
+    }
+
+    /// Counts describing a graph.
+    pub fn graph_stats(&mut self, graph: &str) -> Result<GraphStats> {
+        let response = self.send(op(json!({"GraphStats": {"graph": graph}})))?;
+        response.decode("GraphStats")
+    }
+
+    /// The part of the graph within some hops of `seeds`: the nodes reached
+    /// and every edge joining two of them.
+    ///
+    /// The server's defaults differ from a traversal's: both directions, one
+    /// hop, and up to 1000 nodes.
+    pub fn graph_subgraph(
+        &mut self,
+        graph: &str,
+        seeds: &[&str],
+        options: &TraverseOptions,
+    ) -> Result<GraphSubgraph> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        body.insert("seeds".into(), json!(seeds));
+        put_walk(&mut body, options);
+        let response = self.send(op(json!({"Subgraph": Value::Object(body)})))?;
+        response.decode("Subgraph")
+    }
+
+    /// What the graph's data looks like: its node labels and edge types, each
+    /// with a count and the property keys seen on it.
+    pub fn graph_schema(&mut self, graph: &str) -> Result<GraphSchema> {
+        let response = self.send(op(json!({"GraphSchema": {"graph": graph}})))?;
+        response.decode("GraphSchema")
+    }
+
+    /// The `k` cheapest loopless paths between two nodes, cheapest first.
+    pub fn graph_k_shortest_paths(
+        &mut self,
+        graph: &str,
+        from: &str,
+        to: &str,
+        options: &KPathOptions,
+    ) -> Result<GraphPaths> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        body.insert("from".into(), json!(from));
+        body.insert("to".into(), json!(to));
+        put(&mut body, "k", options.k.filter(|k| *k > 0));
+        put(&mut body, "direction", direction_value(options.direction));
+        put(&mut body, "label", options.label.clone());
+        put(
+            &mut body,
+            "weight_property",
+            options.weight_property.clone(),
+        );
+        let response = self.send(op(json!({"KShortestPaths": Value::Object(body)})))?;
+        response.decode("KShortestPaths")
+    }
+
+    /// Every simple path between two nodes within a hop bound. A work budget
+    /// bounds the search, and [`GraphPaths::complete`] says whether it
+    /// finished.
+    pub fn graph_all_paths(
+        &mut self,
+        graph: &str,
+        from: &str,
+        to: &str,
+        options: &TraverseOptions,
+    ) -> Result<GraphPaths> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        body.insert("from".into(), json!(from));
+        body.insert("to".into(), json!(to));
+        put_walk(&mut body, options);
+        let response = self.send(op(json!({"AllPaths": Value::Object(body)})))?;
+        response.decode("AllPaths")
+    }
+
+    /// Betweenness, closeness or eigenvector centrality, top nodes first.
+    pub fn graph_centrality(
+        &mut self,
+        graph: &str,
+        measure: CentralityMeasure,
+        options: &CentralityOptions,
+    ) -> Result<GraphCentrality> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        body.insert("measure".into(), json!(measure));
+        put(&mut body, "directed", options.directed);
+        put(&mut body, "label", options.label.clone());
+        put(&mut body, "limit", options.limit);
+        put(&mut body, "iterations", options.iterations);
+        put(&mut body, "tolerance", options.tolerance);
+        let response = self.send(op(json!({"Centrality": Value::Object(body)})))?;
+        response.decode("Centrality")
+    }
+
+    /// Communities by Louvain modularity optimisation, direction ignored.
+    pub fn graph_communities(
+        &mut self,
+        graph: &str,
+        options: &CommunityOptions,
+    ) -> Result<GraphCommunities> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        put(&mut body, "label", options.label.clone());
+        put(&mut body, "iterations", options.iterations);
+        put(&mut body, "limit", options.limit);
+        let response = self.send(op(json!({"Communities": Value::Object(body)})))?;
+        response.decode("Communities")
+    }
+
+    /// Triangles and clustering coefficients, direction ignored.
+    pub fn graph_triangle_count(
+        &mut self,
+        graph: &str,
+        label: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<GraphTriangles> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        put(&mut body, "label", label);
+        put(&mut body, "limit", limit);
+        let response = self.send(op(json!({"TriangleCount": Value::Object(body)})))?;
+        response.decode("TriangleCount")
+    }
+
+    /// The nodes whose neighbour sets most resemble `node`'s, most similar
+    /// first.
+    pub fn graph_node_similarity(
+        &mut self,
+        graph: &str,
+        node: &str,
+        options: &SimilarityOptions,
+    ) -> Result<Vec<GraphScore>> {
+        #[derive(Deserialize)]
+        struct Similar {
+            #[serde(default)]
+            results: Vec<GraphScore>,
+        }
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        body.insert("node".into(), json!(node));
+        put(&mut body, "direction", direction_value(options.direction));
+        put(&mut body, "label", options.label.clone());
+        put(&mut body, "metric", options.metric.map(|m| json!(m)));
+        put(&mut body, "limit", options.limit);
+        let response = self.send(op(json!({"NodeSimilarity": Value::Object(body)})))?;
+        let out: Similar = response.decode("NodeSimilarity")?;
+        Ok(out.results)
+    }
+
+    /// Check a graph's stored records against each other and against the
+    /// resident mirror.
+    pub fn graph_check_consistency(&mut self, graph: &str) -> Result<GraphConsistency> {
+        let response = self.send(op(json!({"CheckConsistency": {"graph": graph}})))?;
+        response.decode("CheckConsistency")
+    }
+
+    /// Index node properties for [`Client::graph_find_nodes`]. Several
+    /// properties make a composite index that serves an equality on all of
+    /// them; `label` limits it to nodes carrying that label.
+    pub fn graph_create_node_index(
+        &mut self,
+        graph: &str,
+        name: &str,
+        label: Option<&str>,
+        properties: &[&str],
+    ) -> Result<()> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        body.insert("name".into(), json!(name));
+        put(&mut body, "label", label);
+        body.insert("properties".into(), json!(properties));
+        self.send(op(json!({"CreateNodeIndex": Value::Object(body)})))
+            .map(|_| ())
+    }
+
+    /// Enforce a rule on a property of every node — or, with
+    /// [`ConstraintTarget::Edge`], every relationship — labelled `label`.
+    /// Refused when a stored record already breaks it.
+    pub fn graph_create_constraint(
+        &mut self,
+        graph: &str,
+        name: &str,
+        label: &str,
+        property: &str,
+        kind: ConstraintKind,
+        target: ConstraintTarget,
+    ) -> Result<()> {
+        self.send(op(json!({"CreateConstraint": {
+            "graph": graph,
+            "name": name,
+            "label": label,
+            "property": property,
+            "kind": kind,
+            "target": target,
+        }})))
+        .map(|_| ())
+    }
+
+    /// Drop an index or a constraint by name.
+    pub fn graph_drop_schema_object(&mut self, graph: &str, name: &str) -> Result<()> {
+        self.send(op(
+            json!({"DropSchemaObject": {"graph": graph, "name": name}}),
+        ))
+        .map(|_| ())
+    }
+
+    /// A graph's indexes and constraints.
+    pub fn graph_list_schema_objects(&mut self, graph: &str) -> Result<GraphSchemaObjects> {
+        let response = self.send(op(json!({"ListSchemaObjects": {"graph": graph}})))?;
+        response.decode("ListSchemaObjects")
+    }
+
+    /// Nodes with `label`, when given, whose properties equal these values, in
+    /// id order. [`GraphFoundNodes::plan`] says whether an index answered.
+    pub fn graph_find_nodes(
+        &mut self,
+        graph: &str,
+        label: Option<&str>,
+        properties: Option<&Map<String, Value>>,
+        limit: Option<usize>,
+    ) -> Result<GraphFoundNodes> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        put(&mut body, "label", label);
+        put(&mut body, "properties", properties.cloned());
+        put(&mut body, "limit", limit);
+        let response = self.send(op(json!({"FindNodes": Value::Object(body)})))?;
+        response.decode("FindNodes")
+    }
+
+    /// Import nodes and edges from CSV text as one atomic batch, through the
+    /// same path as [`Client::graph_add_many`], so constraints apply.
+    pub fn graph_import_csv(
+        &mut self,
+        graph: &str,
+        nodes: Option<&str>,
+        edges: Option<&str>,
+    ) -> Result<GraphCounts> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        put(&mut body, "nodes", nodes);
+        put(&mut body, "edges", edges);
+        let response = self.send(op(json!({"ImportCsv": Value::Object(body)})))?;
+        response.decode("ImportCsv")
+    }
+
+    /// PageRank over edge direction, top nodes first.
+    pub fn graph_page_rank(
+        &mut self,
+        graph: &str,
+        options: &PageRankOptions,
+    ) -> Result<GraphPageRank> {
+        let mut body = Map::new();
+        body.insert("graph".into(), json!(graph));
+        put(&mut body, "damping", options.damping);
+        put(&mut body, "iterations", options.iterations);
+        put(&mut body, "tolerance", options.tolerance);
+        put(&mut body, "label", options.label.clone());
+        put(&mut body, "limit", options.limit);
+        let response = self.send(op(json!({"PageRank": Value::Object(body)})))?;
+        response.decode("PageRank")
+    }
+
+    /// Run a Cypher write — `CREATE`, `MERGE`, `SET`, `REMOVE`, `[DETACH]
+    /// DELETE`, optionally after `MATCH … [WHERE …]`.
+    ///
+    /// Separate from [`Client::graph_query`] because it writes. While
+    /// [`Client::set_request_txn`] names a graph transaction the statement is
+    /// queued rather than applied.
+    pub fn graph_execute(&mut self, graph: &str, cypher: &str) -> Result<GraphWriteSummary> {
+        let response = self.send(op(json!({"Execute": {"graph": graph, "cypher": cypher}})))?;
+        response.decode("Execute")
+    }
+
+    /// Open a transaction on a graph, and return its id.
+    ///
+    /// Pass the id to [`Client::set_request_txn`]: every
+    /// [`Client::graph_execute`] sent while it is set is queued, and the
+    /// commit applies them all or none.
+    pub fn graph_begin_transaction(&mut self, graph: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Begun {
+            #[serde(default)]
+            transaction: String,
+        }
+        let response = self.send_in(op(json!({"BeginTransaction": {"graph": graph}})), None)?;
+        let out: Begun = response.decode("BeginTransaction")?;
+        if out.transaction.is_empty() {
+            return Err(Error::protocol(
+                "BeginTransaction answered with no transaction id",
+            ));
+        }
+        Ok(out.transaction)
+    }
+
+    /// Apply every statement queued in a transaction as one write: all of
+    /// them or none. Clears [`Client::set_request_txn`] when it names this
+    /// transaction.
+    pub fn graph_commit_transaction(
+        &mut self,
+        graph: &str,
+        txn: &str,
+    ) -> Result<GraphWriteSummary> {
+        let outcome = self.send_in(
+            op(json!({"CommitTransaction": {"graph": graph}})),
+            Some(txn),
+        );
+        self.forget_txn(txn);
+        outcome?.decode("CommitTransaction")
+    }
+
+    /// Discard a transaction and its queued statements, returning how many
+    /// there were.
+    pub fn graph_rollback_transaction(&mut self, graph: &str, txn: &str) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct RolledBack {
+            #[serde(default)]
+            rolled_back: i64,
+        }
+        let outcome = self.send_in(
+            op(json!({"RollbackTransaction": {"graph": graph}})),
+            Some(txn),
+        );
+        self.forget_txn(txn);
+        let out: RolledBack = outcome?.decode("RollbackTransaction")?;
+        Ok(out.rolled_back)
+    }
+}
+
+/// The four bounds a walk takes, each only when the caller chose one.
+fn put_walk(body: &mut Map<String, Value>, options: &TraverseOptions) {
+    put(body, "direction", direction_value(options.direction));
+    put(body, "label", options.label.clone());
+    put(body, "max_depth", options.max_depth.filter(|d| *d > 0));
+    put(body, "limit", options.limit.filter(|l| *l > 0));
 }
 
 #[cfg(test)]

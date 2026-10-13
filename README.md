@@ -39,6 +39,9 @@ SQL, documents, vectors, graphs and cache over one native connection.
 - Rust **1.85** or later, which is what `rustls` and its dependencies need.
 - A TriCoreDB server speaking protocol 1.0 (`tricore-server` 0.1.0-rc.1 or
   later). See [Running a server](#running-a-server).
+- The methods added in 0.3.0 — marked below — need `tricore-server`
+  **0.1.0-rc.3** or later. An older server does not know those operations and
+  answers them with an error; everything else works against it as before.
 
 ## Installation
 
@@ -50,14 +53,14 @@ Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-tricoredb = "0.2"
+tricoredb = "0.3"
 ```
 
 TLS is on by default. For a build with no cryptography dependencies at all:
 
 ```toml
 [dependencies]
-tricoredb = { version = "0.2", default-features = false }
+tricoredb = { version = "0.3", default-features = false }
 ```
 
 ## Running a server
@@ -295,6 +298,53 @@ let id = db.cache_xadd_text("events", "log", [("msg", "hi")], None)?;
 | Hashes | `cache_hset`, `cache_hset_text`, `cache_hget`, `cache_hdel`, `cache_hgetall`, `cache_hexists`, `cache_hlen` |
 | Streams | `cache_xadd`, `cache_xadd_text`, `cache_xlen`, `cache_xrange`, `cache_xread`, `cache_xdel`, `cache_xtrim` |
 
+Added in 0.3.0, for server 0.1.0-rc.3 and later:
+
+| Family | Methods |
+| --- | --- |
+| Many keys, conditions | `cache_mget`, `cache_mset`, `cache_warm`, `cache_set_if`, `cache_compare_and_swap`, `cache_get_del`, `cache_get_set`, `cache_get_ex`, `cache_append`, `cache_expire_at` |
+| Stale-while-revalidate | `cache_set_fresh`, `cache_get_fresh`, `cache_set_missing` |
+| Sorted sets | `cache_zadd`, `cache_zrem`, `cache_zscore`, `cache_zcard`, `cache_zrank`, `cache_zrange`, `cache_zrange_with_scores`, `cache_zrange_by_score`, `cache_zrange_by_score_with_scores`, `cache_zincr_by` |
+| Locks | `cache_lock_acquire`, `cache_lock_renew`, `cache_lock_release` |
+| Bitmaps | `cache_set_bit`, `cache_get_bit`, `cache_bit_count`, `cache_bit_pos`, `cache_bit_op` |
+| HyperLogLog | `cache_pf_add`, `cache_pf_count`, `cache_pf_merge` |
+| Lists, sets, hashes | `cache_lmove`, `cache_ltrim`, `cache_blpop`, `cache_brpop`, `cache_sunion`, `cache_sinter`, `cache_sdiff`, `cache_srand_member`, `cache_hincr_by` |
+| Pipelines and scripts | `cache_pipeline`, `cache_transaction`, `cache_script_load`, `cache_script_run` |
+| Publish and poll | `cache_publish`, `cache_poll` |
+| Node and database | `cache_stats`, `cache_hot_keys`, `cache_purge_expired`, `cache_flush_database`, `cache_set_namespace_limit`, `cache_get_namespace_limit` |
+
+```rust,no_run
+# fn main() -> tricoredb::Result<()> {
+# let mut db = tricoredb::Client::connect(&tricoredb::Options::default())?;
+use std::time::Duration;
+use tricoredb::{CacheCommand, ScoreBound, ScoredMember};
+
+db.cache_zadd("game", "board", &[ScoredMember::new(120.0, "ada")])?;
+let top = db.cache_zrange_with_scores("game", "board", 0, 9, true)?;
+let above = db.cache_zrange_by_score(
+    "game", "board", ScoreBound::exclusive(100.0), ScoreBound::highest(), false, None,
+)?;
+
+let lock = db.cache_lock_acquire("jobs", "nightly", "worker-1", Duration::from_secs(30))?;
+if lock.acquired {
+    // Pass `lock.token` to whatever the lock protects.
+    db.cache_lock_release("jobs", "nightly", "worker-1")?;
+}
+
+let replies = db.cache_pipeline(&[
+    CacheCommand::set("sessions", "u1", b"token", None),
+    CacheCommand::get("sessions", "u1"),
+])?;
+# let _ = (top, above, replies); Ok(()) }
+```
+
+A sorted-set score is always finite, and JSON has no spelling for an infinity,
+so an open range end is `ScoreBound::lowest()` or `ScoreBound::highest()`; a
+non-finite score or bound is refused before anything is sent.
+`cache_hot_keys` answers only when the server's `[cache] hot_keys` setting is
+above zero, and returns the payload as the server sent it.
+`cache_flush_database` deletes every cache key in the connection's database.
+
 ## Documents
 
 Filters and pipeline stages are built with constructors, so you never write the
@@ -336,6 +386,34 @@ Also available: `document_insert_with_id`, `document_get`,
 `document_drop_collection`, `document_create_index`, `document_drop_index`,
 `document_list_indexes` and `document_analyze`.
 
+Added in 0.3.0, for server 0.1.0-rc.3 and later: `document_replace`,
+`document_insert_many`, `document_delete_many`, `document_bulk_write`,
+`document_rename_collection`, `document_purge_expired`, `document_explain`,
+`document_rebuild_index`, `document_set_collection_options`,
+`document_get_collection_options`, `document_begin_transaction`,
+`document_commit_transaction` and `document_rollback_transaction`.
+
+```rust,no_run
+# fn main() -> tricoredb::Result<()> {
+# let mut db = tricoredb::Client::connect(&tricoredb::Options::default())?;
+use serde_json::json;
+use tricoredb::{BulkOp, DocumentUpdate};
+
+// One atomic batch: every operation lands or none does.
+db.document_bulk_write("orders", &[
+    BulkOp::insert_with_id("o1", json!({"total": 10})),
+    BulkOp::update_one("o2", DocumentUpdate::new().inc("total", 5)).upsert(),
+    BulkOp::delete("o3"),
+])?;
+
+// A transaction spans requests. Requests join it by naming it.
+let txn = db.document_begin_transaction(false)?;
+db.set_request_txn(Some(&txn));
+db.document_insert_with_id("orders", "o4", &json!({"total": 1}))?;
+db.document_commit_transaction(&txn)?; // also stops naming it
+# Ok(()) }
+```
+
 ## Vectors
 
 Fixed-dimension collections with cosine, dot or L2 distance, metadata filters
@@ -363,6 +441,17 @@ Also available: `vector_create_collection_quantized`, `vector_search_filtered`,
 `vector_get`, `vector_delete`, `vector_list_collections`,
 `vector_describe_collection`, `vector_list_vectors` and
 `vector_drop_collection`.
+
+Added in 0.3.0, for server 0.1.0-rc.3 and later: `vector_upsert_many`,
+`vector_upsert_text`, `vector_upsert_named`, `vector_add_named_vector`,
+`vector_delete_many`, `vector_delete_by_filter`, `vector_update_by_filter`,
+`vector_count`, `vector_search_batch`, `vector_search_multi`,
+`vector_search_by_examples`, `vector_embed`, `vector_set_alias`,
+`vector_list_aliases`, `vector_list_partitions`, `vector_rename_collection`,
+`vector_copy_collection`, `vector_set_collection_config`,
+`vector_rebuild_index`, `vector_index_stats` and `vector_measure_recall`.
+`VectorSearchOptions` carries the filter, the named vector to search (`using`)
+and the other per-search settings; a field left at its default is not sent.
 
 ## Graphs
 
@@ -392,6 +481,20 @@ Also available: `graph_get_node`, `graph_get_edge`, `graph_delete_node`,
 `graph_delete_edge`, `graph_list`, `graph_drop`, `graph_traverse`,
 `graph_weighted_shortest_path`, `graph_degree`, `graph_list_nodes`,
 `graph_list_edges` and `graph_query`.
+
+Added in 0.3.0, for server 0.1.0-rc.3 and later:
+
+| Family | Methods |
+| --- | --- |
+| Batch writes | `graph_add_many`, `graph_remove_many`, `graph_update_node`, `graph_update_edge`, `graph_copy`, `graph_import_csv` |
+| Walks and paths | `graph_dfs`, `graph_subgraph`, `graph_k_shortest_paths`, `graph_all_paths` |
+| Algorithms | `graph_connected_components`, `graph_detect_cycle`, `graph_centrality`, `graph_communities`, `graph_triangle_count`, `graph_node_similarity`, `graph_page_rank` |
+| Descriptions | `graph_stats`, `graph_schema`, `graph_check_consistency` |
+| Indexes and constraints | `graph_create_node_index`, `graph_create_constraint`, `graph_drop_schema_object`, `graph_list_schema_objects`, `graph_find_nodes` |
+| Cypher writes | `graph_execute`, `graph_begin_transaction`, `graph_commit_transaction`, `graph_rollback_transaction` |
+
+A graph transaction queues `graph_execute` statements sent while
+`set_request_txn` names it, and the commit applies them all or none.
 
 ## LLM context
 

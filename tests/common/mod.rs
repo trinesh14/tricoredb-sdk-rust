@@ -244,3 +244,24 @@ pub fn unique(prefix: &str) -> String {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
 }
+
+/// Options for a server that is already running, named by the environment.
+///
+/// `TRICORE_TEST_ADDR` is its `host:port`; `TRICORE_TEST_USER` and
+/// `TRICORE_TEST_SECRET` are the credentials, `admin` and `pw` when unset.
+/// `None` when no address is set. A test that uses this shares the server with
+/// whatever else is using it, so it must name everything it creates uniquely
+/// and remove only what it created.
+pub fn external_server() -> Option<Options> {
+    let address = std::env::var("TRICORE_TEST_ADDR").ok()?;
+    let (host, port) = address.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    let user = std::env::var("TRICORE_TEST_USER").unwrap_or_else(|_| "admin".to_string());
+    let secret = std::env::var("TRICORE_TEST_SECRET").unwrap_or_else(|_| "pw".to_string());
+    Some(
+        Options::new(host, port)
+            .user(user)
+            .secret(secret)
+            .connect_timeout(Duration::from_secs(15)),
+    )
+}

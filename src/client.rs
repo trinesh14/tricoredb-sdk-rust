@@ -42,6 +42,7 @@ pub struct Client {
     request_id_prefix: String,
     last_request_id: Option<String>,
     request_timeout_ms: Option<u64>,
+    request_txn: Option<String>,
     read_timeout: Option<Duration>,
     /// Set once this connection can no longer be trusted to be frame-aligned.
     /// Every later call fails with the same error rather than reading the
@@ -145,6 +146,7 @@ impl Client {
             request_id_prefix: next_connection_prefix(),
             last_request_id: None,
             request_timeout_ms: None,
+            request_txn: None,
             read_timeout: None,
             fault: None,
             closed: false,
@@ -293,6 +295,31 @@ impl Client {
             .map(|d| d.as_millis().min(u64::MAX as u128) as u64);
     }
 
+    /// Name a document or graph transaction on every later request. `None`
+    /// clears it.
+    ///
+    /// A document transaction ([`Client::document_begin_transaction`]) and a
+    /// graph one ([`Client::graph_begin_transaction`]) span requests: the
+    /// requests that belong to one say so by carrying its id, and a request
+    /// that does not carry it runs outside the transaction. Committing or
+    /// rolling the transaction back through this crate clears the id again.
+    pub fn set_request_txn(&mut self, txn: Option<&str>) {
+        self.request_txn = txn.filter(|t| !t.is_empty()).map(str::to_string);
+    }
+
+    /// Stop naming `txn` on requests, once it has been committed or rolled
+    /// back.
+    pub(crate) fn forget_txn(&mut self, txn: &str) {
+        if self.request_txn.as_deref() == Some(txn) {
+            self.request_txn = None;
+        }
+    }
+
+    /// The transaction named on every request, when one is.
+    pub fn request_txn(&self) -> Option<&str> {
+        self.request_txn.as_deref()
+    }
+
     /// The `request_id` most recently sent. Pass it to [`Client::cancel`] from a
     /// *second* connection to stop a running statement.
     pub fn last_request_id(&self) -> Option<&str> {
@@ -366,6 +393,13 @@ impl Client {
     }
 
     pub(crate) fn send(&mut self, op: Value) -> Result<Response> {
+        let txn = self.request_txn.clone();
+        self.send_in(op, txn.as_deref())
+    }
+
+    /// Send an operation naming `txn` as its transaction, whatever
+    /// [`Client::set_request_txn`] holds.
+    pub(crate) fn send_in(&mut self, op: Value, txn: Option<&str>) -> Result<Response> {
         self.request_counter += 1;
         let request_id = format!("rs-{}-{}", self.request_id_prefix, self.request_counter);
         self.last_request_id = Some(request_id.clone());
@@ -374,8 +408,15 @@ impl Client {
         envelope.insert("request_id".into(), Value::String(request_id));
         envelope.insert("database".into(), Value::String(self.database.clone()));
         envelope.insert("op".into(), op);
+        let mut options = Map::new();
         if let Some(ms) = self.request_timeout_ms {
-            envelope.insert("options".into(), json!({"timeout_ms": ms}));
+            options.insert("timeout_ms".into(), json!(ms));
+        }
+        if let Some(txn) = txn {
+            options.insert("txn".into(), json!(txn));
+        }
+        if !options.is_empty() {
+            envelope.insert("options".into(), Value::Object(options));
         }
 
         let envelope = Value::Object(envelope);
