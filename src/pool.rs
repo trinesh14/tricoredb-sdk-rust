@@ -48,6 +48,10 @@ struct State {
     closed: bool,
 }
 
+/// How many blocks a closure may leave open before the pool stops rolling
+/// them back one at a time and retires the connection instead.
+const MAX_OPEN_BLOCKS: usize = 64;
+
 impl Pool {
     /// Build a pool holding at most `size` connections.
     ///
@@ -122,9 +126,16 @@ impl Pool {
         let mut left_open = false;
         if !broken && client.in_transaction() {
             left_open = true;
-            // A rollback this client could not complete leaves a session whose
-            // state no next borrower can assume anything about.
-            broken = client.rollback().is_err();
+            // One ROLLBACK closes one block, and the closure may have left
+            // nested ones open, so roll back until the transaction itself is
+            // gone. A rollback this client could not complete leaves a session
+            // whose state no next borrower can assume anything about.
+            for _ in 0..MAX_OPEN_BLOCKS {
+                if !client.in_transaction() || client.rollback().is_err() {
+                    break;
+                }
+            }
+            broken = client.in_transaction() || client.is_poisoned();
         }
         self.release(client, broken);
 

@@ -135,6 +135,83 @@ fn refusal(rid: &str, code: &str, leader: Option<&str>) -> String {
     )
 }
 
+/// The replies a server gives to BEGIN, BEGIN, ROLLBACK, BEGIN, COMMIT, COMMIT:
+/// the second BEGIN opens a nested block, and closing a nested block answers
+/// with `nested_depth` instead of an outcome.
+fn nested_reply(rid: &str, n: usize) -> String {
+    let data = match n {
+        1 => r#"{"committed_writes":0,"discarded_writes":0,"statements":0,"transaction":"began"}"#,
+        2 | 4 => r#"{"nested_depth":1,"rows_affected":0}"#,
+        3 | 5 => r#"{"nested_depth":0,"rows_affected":0}"#,
+        _ => {
+            r#"{"committed_writes":1,"discarded_writes":0,"statements":2,"transaction":"committed"}"#
+        }
+    };
+    format!(r#"{{"request_id":"{rid}","status":"ok","data":{{"Json":{data}}},"diagnostics":{{}}}}"#)
+}
+
+#[test]
+fn closing_a_nested_block_leaves_the_transaction_open() {
+    let peer = Peer::start(nested_reply);
+    let mut db = Client::connect(&peer.options()).expect("connect");
+
+    db.begin().expect("begin");
+    assert!(db.in_transaction());
+    assert_eq!(db.begin().expect("nested begin").nested_depth, Some(1));
+    assert_eq!(
+        db.rollback().expect("nested rollback").nested_depth,
+        Some(0)
+    );
+    assert!(
+        db.in_transaction(),
+        "a ROLLBACK that closed a nested block did not end the transaction"
+    );
+    db.begin().expect("nested begin");
+    db.commit().expect("nested commit");
+    assert!(
+        db.in_transaction(),
+        "a COMMIT that released a nested block did not end the transaction"
+    );
+    let done = db.commit().expect("commit");
+    assert_eq!(done.outcome, "committed");
+    assert_eq!(done.nested_depth, None);
+    assert!(!db.in_transaction());
+}
+
+#[test]
+fn a_pool_rolls_back_every_block_a_closure_left_open() {
+    // BEGIN and a nested BEGIN from the closure; then the pool's own
+    // rollbacks: the first closes the nested block, the second the transaction.
+    let peer = Peer::start(|rid, n| {
+        let data = match n {
+            1 => r#"{"transaction":"began"}"#,
+            2 => r#"{"nested_depth":1,"rows_affected":0}"#,
+            3 => r#"{"nested_depth":0,"rows_affected":0}"#,
+            _ => r#"{"transaction":"rolled_back"}"#,
+        };
+        format!(
+            r#"{{"request_id":"{rid}","status":"ok","data":{{"Json":{data}}},"diagnostics":{{}}}}"#
+        )
+    });
+    let pool = Pool::new(peer.options(), 1).expect("pool");
+    let left_open = pool.with_connection(|db| {
+        db.begin()?;
+        db.begin()?;
+        Ok(())
+    });
+    assert!(
+        left_open.is_err(),
+        "a closure that leaves a block open is told so"
+    );
+    assert_eq!(
+        peer.requests(),
+        4,
+        "one rollback closed the nested block and a second the transaction"
+    );
+    let next = pool.with_connection(|db| Ok(db.in_transaction()));
+    assert_eq!(next.ok(), Some(false), "the next borrower starts clean");
+}
+
 #[test]
 fn a_refused_request_goes_to_the_leader_and_stays_there() {
     let leader = Peer::start(|rid, _| ok(rid));

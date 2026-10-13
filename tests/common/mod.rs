@@ -248,20 +248,37 @@ pub fn unique(prefix: &str) -> String {
 /// Options for a server that is already running, named by the environment.
 ///
 /// `TRICORE_TEST_ADDR` is its `host:port`; `TRICORE_TEST_USER` and
-/// `TRICORE_TEST_SECRET` are the credentials, `admin` and `pw` when unset.
-/// `None` when no address is set. A test that uses this shares the server with
-/// whatever else is using it, so it must name everything it creates uniquely
-/// and remove only what it created.
-pub fn external_server() -> Option<Options> {
-    let address = std::env::var("TRICORE_TEST_ADDR").ok()?;
-    let (host, port) = address.rsplit_once(':')?;
-    let port: u16 = port.parse().ok()?;
-    let user = std::env::var("TRICORE_TEST_USER").unwrap_or_else(|_| "admin".to_string());
-    let secret = std::env::var("TRICORE_TEST_SECRET").unwrap_or_else(|_| "pw".to_string());
-    Some(
+/// `TRICORE_TEST_SECRET` are the credentials. `Ok(None)` when no address is
+/// set. A test that uses this shares the server with whatever else is using
+/// it, so it must name everything it creates uniquely and remove only what it
+/// created.
+///
+/// All three are required together, and an address without credentials is an
+/// error rather than a guess: a wrong password against a real server is how an
+/// account gets locked out for everyone using it.
+pub fn external_server() -> Result<Option<Options>, String> {
+    let Ok(address) = std::env::var("TRICORE_TEST_ADDR") else {
+        return Ok(None);
+    };
+    let (Ok(user), Ok(secret)) = (
+        std::env::var("TRICORE_TEST_USER"),
+        std::env::var("TRICORE_TEST_SECRET"),
+    ) else {
+        return Err(
+            "TRICORE_TEST_ADDR is set, so TRICORE_TEST_USER and TRICORE_TEST_SECRET must be too"
+                .to_string(),
+        );
+    };
+    let port = address
+        .rsplit_once(':')
+        .and_then(|(host, port)| Some((host, port.parse::<u16>().ok()?)));
+    let Some((host, port)) = port else {
+        return Err(format!("TRICORE_TEST_ADDR=`{address}` is not a host:port"));
+    };
+    Ok(Some(
         Options::new(host, port)
             .user(user)
             .secret(secret)
             .connect_timeout(Duration::from_secs(15)),
-    )
+    ))
 }

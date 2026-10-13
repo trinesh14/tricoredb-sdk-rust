@@ -29,8 +29,10 @@ use common::{external_server, start_server, unique, Server};
 
 /// How to reach the server these tests use, or `None` to skip.
 fn options() -> Option<Options> {
-    if let Some(options) = external_server() {
-        return Some(options);
+    match external_server() {
+        Ok(Some(options)) => return Some(options),
+        Ok(None) => {}
+        Err(reason) => panic!("{reason}"),
     }
     static SERVER: OnceLock<Result<Server, String>> = OnceLock::new();
     match SERVER.get_or_init(start_server) {
@@ -50,6 +52,76 @@ fn live(test: impl FnOnce(&mut Client)) {
 
 fn object(value: Value) -> Map<String, Value> {
     value.as_object().expect("an object").clone()
+}
+
+#[test]
+fn a_nested_begin_opens_a_block_inside_the_transaction() {
+    let Some(options) = options() else { return };
+    let mut db = Client::connect(&options).expect("connect");
+    let table = unique("rs_nested");
+    db.execute(&format!("CREATE TABLE {table} (id INT PRIMARY KEY)"))
+        .expect("create");
+
+    // Another client's schema change aborts an open transaction on a shared
+    // server, which is the server's rule and not what is under test: try the
+    // whole exchange again when that happens.
+    let mut outcome = Err(tricoredb::Error::new(ErrorKind::Server, "not run"));
+    for _ in 0..3 {
+        if db.in_transaction() {
+            let _ = db.rollback();
+        }
+        let _ = db.execute(&format!("DELETE FROM {table}"));
+        outcome = nested_exchange(&mut db, &table);
+        if outcome.is_ok() {
+            break;
+        }
+    }
+    outcome.expect("the nested exchange");
+
+    let rows = db
+        .query(&format!("SELECT id FROM {table} ORDER BY id"))
+        .expect("read back");
+    assert_eq!(
+        rows.rows,
+        vec![vec!["1".to_string()], vec!["3".to_string()]],
+        "the outer write and the released block survive; the rolled-back block is gone"
+    );
+    assert!(db.commit().is_err(), "nothing is open any more");
+    let _ = db.execute(&format!("DROP TABLE {table}"));
+}
+
+/// BEGIN, a write, a nested block rolled back, a nested block committed, and
+/// the outer COMMIT — asserting at each step whether a transaction is open.
+fn nested_exchange(db: &mut Client, table: &str) -> tricoredb::Result<()> {
+    let outer = db.begin()?;
+    assert_eq!(outer.outcome, "began");
+    assert_eq!(outer.nested_depth, None);
+    db.execute(&format!("INSERT INTO {table} VALUES (1)"))?;
+
+    let inner = db.begin()?;
+    assert_eq!(inner.nested_depth, Some(1), "a second BEGIN nests");
+    db.execute(&format!("INSERT INTO {table} VALUES (2)"))?;
+    let undone = db.rollback()?;
+    assert_eq!(undone.nested_depth, Some(0));
+    assert!(
+        db.in_transaction(),
+        "rolling a nested block back leaves the transaction open"
+    );
+
+    db.begin()?;
+    db.execute(&format!("INSERT INTO {table} VALUES (3)"))?;
+    let released = db.commit()?;
+    assert_eq!(released.nested_depth, Some(0));
+    assert!(
+        db.in_transaction(),
+        "committing a nested block leaves the transaction open"
+    );
+
+    let done = db.commit()?;
+    assert_eq!(done.outcome, "committed");
+    assert_eq!(done.nested_depth, None);
+    assert!(!db.in_transaction());
+    Ok(())
 }
 
 #[test]

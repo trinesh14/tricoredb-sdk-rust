@@ -62,6 +62,15 @@ the methods that existed before are unchanged and work against it as before.
   transaction named on every later request. Committing or rolling a
   transaction back through this crate clears it.
 
+### Fixed
+
+- A `BEGIN` sent inside an open transaction opens a nested block, and the
+  `COMMIT` or `ROLLBACK` that closes it leaves the transaction open.
+  `in_transaction` reported false after it, so a `Pool` could hand the
+  connection on mid-transaction. It now follows the reply: one carrying
+  `nested_depth` closed a nested block only. `TransactionResult` gains
+  `nested_depth`, and a pool rolls back every block a closure left open.
+
 ### Changed
 
 - `VectorHit` has two new public fields, `vector` and `reason`, so building one

@@ -113,9 +113,15 @@ pub struct TransactionResult {
     /// How many buffered writes were thrown away.
     #[serde(default)]
     pub discarded_writes: i64,
-    /// `"began"`, `"committed"` or `"rolled_back"`.
+    /// `"began"`, `"committed"` or `"rolled_back"`. Empty for a nested block,
+    /// which reports [`TransactionResult::nested_depth`] instead.
     #[serde(default, rename = "transaction")]
     pub outcome: String,
+    /// Set when the keyword opened or closed a nested block rather than the
+    /// transaction itself: how many nested blocks are still open. The outer
+    /// transaction is open whenever this is set, zero included.
+    #[serde(default)]
+    pub nested_depth: Option<i64>,
 }
 
 impl Client {
@@ -219,6 +225,12 @@ impl Client {
     /// Without it this fails before writing anything, rather than sending a
     /// `BEGIN` the server would run as a one-statement script;
     /// [`Client::transaction`] works everywhere.
+    ///
+    /// Sent inside an open transaction, `BEGIN` opens a nested block backed by
+    /// a savepoint: its [`Client::commit`] releases it, its
+    /// [`Client::rollback`] undoes only the block, and the outer transaction
+    /// stays open either way. [`Client::in_transaction`] follows the outer
+    /// transaction, so it stays true until that one ends.
     pub fn begin(&mut self) -> Result<TransactionResult> {
         if !self.session_txn_granted() {
             return Err(Error::feature_refusal(
@@ -283,13 +295,16 @@ Use transaction(...) to send the whole unit as one request",
     ///
     /// Control travels as `Exec`, because the server authorizes it as a write.
     /// Every `COMMIT`/`ROLLBACK` reply — a refusal included — ends the
-    /// transaction, since the server ends it either way. The exception is a
-    /// request that never left this process, which stays as it was.
+    /// transaction, since the server ends it either way. The exceptions are a
+    /// request that never left this process, which stays as it was, and a
+    /// reply carrying `nested_depth`: that one closed a nested block, and the
+    /// transaction around it is still open.
     fn transaction_control(&mut self, keyword: &str) -> Result<TransactionResult> {
         match self.execute(keyword) {
             Ok(response) => {
-                self.set_txn_open(keyword == "BEGIN");
-                response.decode(keyword)
+                let result: TransactionResult = response.decode(keyword)?;
+                self.set_txn_open(keyword == "BEGIN" || result.nested_depth.is_some());
+                Ok(result)
             }
             Err(error) => {
                 if keyword != "BEGIN" && !error.was_refused_locally() {
